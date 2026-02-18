@@ -1,0 +1,48 @@
+{
+  "name": "LLM Gateway",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "app",
+  "workspaceFolder": "/workspace",
+  "features": {
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.11"
+    },
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "moby": false
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "charliermarsh.ruff",
+        "ms-azuretools.vscode-docker",
+        "tamasfe.even-better-toml"
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "charliermarsh.ruff",
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff",
+          "editor.codeActionsOnSave": {
+            "source.fixAll.ruff": "explicit",
+            "source.organizeImports.ruff": "explicit"
+          }
+        },
+        "ruff.enable": true,
+        "ruff.organizeImports": true,
+        "python.analysis.typeCheckingMode": "basic"
+      }
+    }
+  },
+  "forwardPorts": [8000, 6379, 5432, 3000, 9090, 16686],
+  "portsAttributes": {
+    "8000": { "label": "FastAPI" },
+    "6379": { "label": "Redis" },
+    "5432": { "label": "Postgres" },
+    "3000": { "label": "Grafana" },
+    "9090": { "label": "Prometheus" },
+    "16686": { "label": "Jaeger UI" }
+  },
+  "postCreateCommand": "pip install -e '.[dev]' && pre-commit install"
+}

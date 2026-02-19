@@ -15,9 +15,11 @@
     "vscode": {
       "extensions": [
         "ms-python.python",
+        "ms-python.vscode-pylance",
         "charliermarsh.ruff",
         "ms-azuretools.vscode-docker",
-        "tamasfe.even-better-toml"
+        "tamasfe.even-better-toml",
+        "Anthropic.claude-code"  // Claude Code auto-installs
       ],
       "settings": {
         "editor.formatOnSave": true,

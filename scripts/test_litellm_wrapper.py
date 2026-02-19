@@ -1,10 +1,12 @@
 # scripts/test_litellm_wrapper.py
 import asyncio
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(override=True)  # must run before litellm is imported so it sees ANTHROPIC_API_KEY
+# Resolve .env relative to the repo root so this script works from any cwd.
+load_dotenv(Path(__file__).parent.parent / ".env", override=True)
 
 from llmgateway.providers.litellm_wrapper import LLMGatewayProvider  # noqa: E402
 from llmgateway.providers.models import CompletionRequest  # noqa: E402

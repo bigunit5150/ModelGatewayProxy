@@ -9,10 +9,6 @@ services:
       - ..:/workspace:cached
     working_dir: /workspace
     command: sleep infinity
-    environment:
-      - REDIS_URL=redis://redis:6379
-      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/llmgateway
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
     depends_on:
       - redis
       - postgres

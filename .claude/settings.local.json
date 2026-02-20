@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(pip show:*)",
+      "Bash(docker compose:*)",
+      "Bash(docker ps:*)",
+      "Bash(curl:*)",
+      "Bash(python3:*)",
+      "Bash(echo:*)",
+      "Read(//home/vscode/**)",
+      "Read(//etc/**)",
+      "Bash(sudo sed:*)",
+      "Bash(source ~/.bashrc)",
+      "Bash(~/.profile:*)",
+      "Bash(export OTEL_EXPORTER_OTLP_ENDPOINT=\"http://localhost:4318\")",
+      "Bash(export REDIS_URL=\"redis://localhost:6379\")",
+      "Bash(export DATABASE_URL=\"postgresql+asyncpg://postgres:postgres@localhost:5432/llmgateway\")",
+      "Bash(OTEL_EXPORTER_OTLP_ENDPOINT=\"http://localhost:4318\" REDIS_URL=\"redis://localhost:6379\" DATABASE_URL=\"postgresql+asyncpg://postgres:postgres@localhost:5432/llmgateway\" python -m pytest:*)",
+      "Bash(env:*)"
+    ],
+    "additionalDirectories": [
+      "/workspace/tests",
+      "/home/vscode"
+    ]
+  }
+}

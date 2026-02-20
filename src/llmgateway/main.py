@@ -1,3 +1,5 @@
+import os
+
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,8 +11,10 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from prometheus_client import make_asgi_app
 
+from llmgateway.api.completions import router as completions_router
 from llmgateway.api.health import router as health_router
 from llmgateway.config import settings
+from llmgateway.providers import LLMGatewayProvider
 
 # ---------------------------------------------------------------------------
 # Structured logging
@@ -71,6 +75,7 @@ app.mount("/metrics", metrics_app)
 
 # Routers
 app.include_router(health_router)
+app.include_router(completions_router)
 
 # Instrument *after* routes are registered
 FastAPIInstrumentor.instrument_app(app, tracer_provider=tracer_provider)
@@ -81,10 +86,32 @@ FastAPIInstrumentor.instrument_app(app, tracer_provider=tracer_provider)
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def _startup() -> None:
+    # Propagate API keys from Settings into os.environ so LiteLLM can read them.
+    # pydantic-settings reads the .env file into the Settings object but does
+    # NOT automatically populate os.environ.
+    _key_map = {
+        "OPENAI_API_KEY": settings.openai_api_key,
+        "ANTHROPIC_API_KEY": settings.anthropic_api_key,
+        "TOGETHER_API_KEY": settings.together_api_key,
+        "GROQ_API_KEY": settings.groq_api_key,
+    }
+    for env_var, secret in _key_map.items():
+        if secret is not None:
+            os.environ[env_var] = secret.get_secret_value()
+
+    # Initialise the shared provider and attach it to app state so the
+    # get_provider() dependency can inject it into every request handler.
+    app.state.provider = LLMGatewayProvider(
+        timeout=settings.llm_timeout,
+        max_retries=settings.llm_max_retries,
+    )
+
     log.info(
-        "LLM Gateway started",
+        "LLM Gateway ready",
         host=settings.host,
         port=settings.port,
+        llm_timeout=settings.llm_timeout,
+        llm_max_retries=settings.llm_max_retries,
         redis_url=settings.redis_url,
         otel_endpoint=settings.otel_exporter_otlp_endpoint,
     )

@@ -1,4 +1,4 @@
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,6 +25,16 @@ class Settings(BaseSettings):
     otel_exporter_otlp_endpoint: str = Field(default="http://jaeger:4318")
     otel_service_name: str = Field(default="llm-gateway")
     log_level: str = Field(default="INFO")
+
+    # LLM provider API keys — stored as SecretStr to avoid accidental logging
+    openai_api_key: SecretStr | None = Field(default=None)
+    anthropic_api_key: SecretStr | None = Field(default=None)
+    together_api_key: SecretStr | None = Field(default=None)
+    groq_api_key: SecretStr | None = Field(default=None)
+
+    # LLM call behaviour
+    llm_timeout: int = Field(default=60)
+    llm_max_retries: int = Field(default=3)
 
 
 settings = Settings()

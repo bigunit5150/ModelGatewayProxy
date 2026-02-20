@@ -85,7 +85,7 @@ class _AsyncStreamResponse:
     def __init__(self, chunks: list[_StreamChunk]) -> None:
         self._chunks = chunks
 
-    def __aiter__(self) -> "_AsyncStreamResponse":
+    def __aiter__(self) -> _AsyncStreamResponse:
         self._iter = iter(self._chunks)
         return self
 
@@ -561,9 +561,7 @@ class TestNonStreamingSuccess:
         """prompt_tokens and completion_tokens are mapped to input/output_tokens."""
         mocker.patch(
             "llmgateway.providers.litellm_wrapper.litellm.acompletion",
-            new=AsyncMock(
-                return_value=_CompletionResponse(prompt_tokens=20, completion_tokens=10)
-            ),
+            new=AsyncMock(return_value=_CompletionResponse(prompt_tokens=20, completion_tokens=10)),
         )
 
         chunks = [chunk async for chunk in provider.generate(non_streaming_request)]
@@ -675,9 +673,7 @@ class TestErrorMapping:
         self, provider: LLMGatewayProvider, mocker: Any
     ) -> None:
         """retry_after is None when the litellm exception does not carry it."""
-        err = await self._assert_maps_to(
-            provider, mocker, _rate_limit_error(), RateLimitError
-        )
+        err = await self._assert_maps_to(provider, mocker, _rate_limit_error(), RateLimitError)
         assert err.retry_after is None
 
     async def test_timeout_maps_to_timeout_error(
@@ -754,9 +750,7 @@ class TestErrorMapping:
         self, provider: LLMGatewayProvider, mocker: Any
     ) -> None:
         """Bare 'gpt-*' model names are attributed to 'openai'."""
-        err = await self._assert_maps_to(
-            provider, mocker, _auth_error(), AuthError, model="gpt-4o"
-        )
+        err = await self._assert_maps_to(provider, mocker, _auth_error(), AuthError, model="gpt-4o")
         assert err.provider == "openai"
 
     async def test_auth_error_message_includes_provider_name(
@@ -778,9 +772,9 @@ class TestErrorMapping:
         ]
         for litellm_exc, expected_type in cases:
             err = await self._assert_maps_to(provider, mocker, litellm_exc, expected_type)
-            assert err.original_error is litellm_exc, (
-                f"{expected_type.__name__}.original_error should be the original litellm exc"
-            )
+            assert (
+                err.original_error is litellm_exc
+            ), f"{expected_type.__name__}.original_error should be the original litellm exc"
 
 
 # ---------------------------------------------------------------------------
@@ -799,17 +793,13 @@ class TestRetryLogic:
             new=AsyncMock(return_value=None),
         )
 
-    async def test_retries_on_rate_limit_succeeds_on_third_attempt(
-        self, mocker: Any
-    ) -> None:
+    async def test_retries_on_rate_limit_succeeds_on_third_attempt(self, mocker: Any) -> None:
         """Two consecutive RateLimitErrors are retried; success on attempt 3 is returned."""
         provider = LLMGatewayProvider(timeout=5, max_retries=3)
         response = _CompletionResponse(content="ok")
         mock_acompletion = mocker.patch(
             "llmgateway.providers.litellm_wrapper.litellm.acompletion",
-            new=AsyncMock(
-                side_effect=[_rate_limit_error(), _rate_limit_error(), response]
-            ),
+            new=AsyncMock(side_effect=[_rate_limit_error(), _rate_limit_error(), response]),
         )
         request = CompletionRequest(
             model="claude-haiku-4-5-20251001",
@@ -822,9 +812,7 @@ class TestRetryLogic:
         assert mock_acompletion.call_count == 3
         assert chunks[0].content == "ok"
 
-    async def test_retries_on_timeout_succeeds_on_second_attempt(
-        self, mocker: Any
-    ) -> None:
+    async def test_retries_on_timeout_succeeds_on_second_attempt(self, mocker: Any) -> None:
         """A single TimeoutError triggers one retry; the next success is returned."""
         provider = LLMGatewayProvider(timeout=5, max_retries=3)
         response = _CompletionResponse(content="done")
@@ -843,9 +831,7 @@ class TestRetryLogic:
         assert mock_acompletion.call_count == 2
         assert chunks[0].content == "done"
 
-    async def test_retries_on_provider_unavailable_succeeds(
-        self, mocker: Any
-    ) -> None:
+    async def test_retries_on_provider_unavailable_succeeds(self, mocker: Any) -> None:
         """A 503 ServiceUnavailableError triggers a retry that eventually succeeds."""
         provider = LLMGatewayProvider(timeout=5, max_retries=3)
         response = _CompletionResponse(content="recovered")
@@ -929,7 +915,7 @@ class TestRetryLogic:
         class _FailAfterFirstChunk:
             """Async iterator that yields one chunk then raises."""
 
-            def __aiter__(self) -> "_FailAfterFirstChunk":
+            def __aiter__(self) -> _FailAfterFirstChunk:
                 self._count = 0
                 return self
 
@@ -1005,9 +991,7 @@ class TestTokenCounting:
         count = await provider.count_tokens("Hello world", "unknown-model")
         assert count > 0
 
-    async def test_fallback_minimum_is_one(
-        self, provider: LLMGatewayProvider, mocker: Any
-    ) -> None:
+    async def test_fallback_minimum_is_one(self, provider: LLMGatewayProvider, mocker: Any) -> None:
         """The word-count fallback always returns at least 1, even for empty input."""
         mocker.patch(
             "llmgateway.providers.litellm_wrapper.litellm.token_counter",
@@ -1300,12 +1284,10 @@ class TestEdgeCases:
         ProviderError (not a raw litellm exception), it must not be double-wrapped.
         """
 
-        original_error = ProviderUnavailableError(
-            message="upstream gone", provider="anthropic"
-        )
+        original_error = ProviderUnavailableError(message="upstream gone", provider="anthropic")
 
         class _StreamRaisesProviderError:
-            def __aiter__(self) -> "_StreamRaisesProviderError":
+            def __aiter__(self) -> _StreamRaisesProviderError:
                 return self
 
             async def __anext__(self) -> _StreamChunk:
@@ -1327,9 +1309,7 @@ class TestEdgeCases:
         # Must be the exact same object — no re-wrapping.
         assert exc_info.value is original_error
 
-    def test_map_error_returns_provider_error_unchanged(
-        self, provider: LLMGatewayProvider
-    ) -> None:
+    def test_map_error_returns_provider_error_unchanged(self, provider: LLMGatewayProvider) -> None:
         """_map_error returns an already-mapped ProviderError as-is (no double-wrap).
 
         This exercises line 398: the early-exit guard that prevents wrapping a

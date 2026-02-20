@@ -9,7 +9,8 @@ A production-grade API gateway for large language models. Routes requests to mul
 ```
 ┌───────────────┐     HTTP      ┌──────────────────────────────────┐
 │    Client     │ ────────────► │  FastAPI  (:8000)                │
-└───────────────┘               │    /health   /health/live        │
+└───────────────┘               │    POST /v1/chat/completions     │
+                                │    /health   /health/live        │
                                 │    /health/ready  /metrics       │
                                 └──────────────┬───────────────────┘
                                                │
@@ -89,6 +90,80 @@ make test
 make dev
 # Server running at http://localhost:8000
 ```
+
+---
+
+## HTTP API
+
+The gateway exposes an **OpenAI-compatible** REST API, so any client that works with OpenAI can point at this gateway without modification.
+
+### `POST /v1/chat/completions`
+
+**Request body** (OpenAI wire format):
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `model` | string | required | LiteLLM model string (e.g. `claude-haiku-4-5-20251001`, `gpt-4o`, `groq/llama-3.1-70b-versatile`) |
+| `messages` | array | required | Conversation history — each item must have `role` and `content` |
+| `temperature` | float | `0.7` | Sampling temperature `[0.0, 2.0]` |
+| `max_tokens` | int | `null` | Maximum tokens to generate (provider default if omitted) |
+| `stream` | bool | `false` | Stream tokens as Server-Sent Events |
+| `user` | string | `null` | Opaque user identifier forwarded to the provider |
+
+**Response headers** included on every response:
+
+| Header | Description |
+|---|---|
+| `X-Request-ID` | UUID identifying this specific request (appears in logs and traces) |
+| `X-Provider` | Detected provider name (e.g. `anthropic`, `openai`, `groq`) |
+| `X-Cache-Status` | `MISS` (caching not yet implemented) |
+
+**curl — non-streaming:**
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-haiku-4-5-20251001",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }' | jq .
+```
+
+**curl — streaming:**
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Count to five."}],
+    "stream": true
+  }'
+```
+
+**OpenAI Python SDK** (pointing at the gateway):
+
+```python
+from openai import AsyncOpenAI
+
+client = AsyncOpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+
+response = await client.chat.completions.create(
+    model="claude-haiku-4-5-20251001",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+print(response.choices[0].message.content)
+```
+
+**Error responses** follow the OpenAI format and use standard HTTP status codes:
+
+| Error | Status |
+|---|---|
+| Invalid request | 400 |
+| Authentication failure | 401 |
+| Rate limited (`Retry-After` header set) | 429 |
+| Gateway timeout | 504 |
+| Provider unavailable | 502 |
 
 ---
 
@@ -211,17 +286,34 @@ make clean        # Remove build artefacts and caches
 ### Running tests
 
 ```bash
-# All tests
+# All unit tests (integration tests excluded by default)
 pytest
 
-# Provider tests only (fast, no API calls)
+# Provider layer tests only
 pytest tests/providers/ -v
+
+# HTTP API endpoint tests only
+pytest tests/api/ -v
 
 # With coverage report
 pytest --cov=src/llmgateway --cov-report=term-missing
 ```
 
-### Manual provider tests (real API calls)
+### Integration tests (real API calls)
+
+Integration tests make live API calls and require valid keys in `.env`. They are excluded from the default `pytest` run.
+
+```bash
+# Run all integration tests
+pytest -m integration -v
+
+# Run with a specific provider only
+ANTHROPIC_API_KEY=sk-ant-... pytest -m integration -v
+```
+
+Jaeger and Prometheus integration tests additionally require the Docker Compose stack (`docker compose up -d`).
+
+### Manual provider smoke tests
 
 ```bash
 # Test Anthropic only
@@ -238,9 +330,9 @@ python scripts/test_all_providers.py
 ### Health endpoints
 
 ```
-GET /health         → {"status": "healthy", "version": "0.1.0"}
+GET /health         → {"status": "healthy", "version": "0.1.0", "timestamp": "..."}
 GET /health/live    → {"status": "alive"}          (Kubernetes liveness)
-GET /health/ready   → {"status": "ready", ...}     (checks Redis + Postgres)
+GET /health/ready   → {"status": "ready", "checks": {...}}  (checks Redis + Postgres)
 GET /metrics        → Prometheus metrics
 ```
 
@@ -271,6 +363,7 @@ All logs are emitted as JSON with a `request_id` field that links the start, err
 llm-gateway/
 ├── src/llmgateway/
 │   ├── api/
+│   │   ├── completions.py     # POST /v1/chat/completions (OpenAI-compatible)
 │   │   └── health.py          # Health check endpoints
 │   ├── providers/
 │   │   ├── litellm_wrapper.py # LLMGatewayProvider — main entry point
@@ -279,8 +372,13 @@ llm-gateway/
 │   ├── config.py              # Pydantic settings (reads .env)
 │   └── main.py                # FastAPI app + OTel setup
 ├── tests/
+│   ├── api/
+│   │   └── test_completions.py       # Unit tests for /v1/chat/completions
+│   ├── integration/
+│   │   └── test_gateway_integration.py  # End-to-end tests (real API calls)
 │   ├── providers/
-│   │   └── test_litellm_wrapper.py   # 75 unit tests, 100% coverage
+│   │   └── test_litellm_wrapper.py   # Unit tests for the provider layer
+│   ├── conftest.py                   # Shared fixtures
 │   └── test_health.py                # Health endpoint tests
 ├── scripts/
 │   ├── test_litellm_wrapper.py       # Anthropic smoke test

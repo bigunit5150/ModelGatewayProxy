@@ -47,7 +47,7 @@ def _make_error_provider(exc: Exception) -> MagicMock:
     async def _gen(_req):
         if True:  # always — makes the function an async generator via the yield below
             raise exc
-        yield  # noqa: unreachable — required to make _gen an async generator
+        yield  # noqa: E402 — required to make _gen an async generator
 
     mock = MagicMock()
     mock.generate = _gen

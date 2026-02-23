@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env", override=True)
 
 from llmgateway.providers.litellm_wrapper import LLMGatewayProvider  # noqa: E402
-from llmgateway.providers.models import CompletionRequest
+from llmgateway.providers.models import CompletionRequest  # noqa: E402
 
 PROVIDERS_TO_TEST = [
     {"name": "OpenAI GPT-4o-mini", "model": "gpt-4o-mini", "required_env": "OPENAI_API_KEY"},

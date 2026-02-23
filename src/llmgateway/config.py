@@ -36,5 +36,10 @@ class Settings(BaseSettings):
     llm_timeout: int = Field(default=60)
     llm_max_retries: int = Field(default=3)
 
+    # Cache
+    cache_ttl: int = Field(
+        default=3600, description="TTL in seconds for cached responses (default 1 hour)"
+    )
+
 
 settings = Settings()

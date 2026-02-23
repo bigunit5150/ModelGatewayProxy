@@ -19,6 +19,7 @@ from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 from pydantic import BaseModel, Field
 
+from llmgateway.cache import CacheManager
 from llmgateway.providers import (
     AuthError,
     CompletionRequest,
@@ -81,6 +82,11 @@ def get_provider(request: Request) -> LLMGatewayProvider:
     return provider
 
 
+def get_cache_manager(request: Request) -> CacheManager | None:
+    """Return the shared :class:`CacheManager` from ``app.state``, or ``None``."""
+    return getattr(request.app.state, "cache_manager", None)
+
+
 # ---------------------------------------------------------------------------
 # Endpoint
 # ---------------------------------------------------------------------------
@@ -91,6 +97,7 @@ async def chat_completions(
     body: ChatCompletionRequest,
     request: Request,
     provider: LLMGatewayProvider = Depends(get_provider),
+    cache_manager: CacheManager | None = Depends(get_cache_manager),
 ) -> StreamingResponse | JSONResponse:
     """Generate a chat completion.
 
@@ -171,8 +178,27 @@ async def chat_completions(
             )
 
         # ------------------------------------------------------------------
-        # Non-streaming
+        # Non-streaming — check cache first
         # ------------------------------------------------------------------
+
+        # CacheManager.get_cached_response() is internally fail-open: it
+        # returns None on any Redis error, so no extra try/except is needed.
+        if cache_manager is not None:
+            cached = await cache_manager.get_cached_response(completion_request)
+            if cached is not None:
+                duration_ms = round((time.monotonic() - start_time) * 1000, 2)
+                span.set_attribute("cache.hit", True)
+                log.info(
+                    "completion_request_complete",
+                    duration_ms=duration_ms,
+                    usage=cached.get("usage"),
+                    cache_hit=True,
+                )
+                return JSONResponse(
+                    content=cached,
+                    headers={**base_headers, "X-Cache-Status": "HIT"},
+                )
+
         try:
             response_data = await _build_json_response(
                 provider, completion_request, request_id, created
@@ -196,6 +222,11 @@ async def chat_completions(
                 detail={"message": exc.message, "type": type(exc).__name__},
                 headers=error_headers,
             ) from exc
+
+        # Store the response in cache (fail-open: errors are swallowed inside
+        # CacheManager.cache_response()).
+        if cache_manager is not None:
+            await cache_manager.cache_response(completion_request, response_data)
 
         usage = response_data.get("usage", {})
         duration_ms = round((time.monotonic() - start_time) * 1000, 2)

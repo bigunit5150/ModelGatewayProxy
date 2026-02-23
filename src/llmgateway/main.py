@@ -1,5 +1,6 @@
 import os
 
+import redis.asyncio as aioredis
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +14,7 @@ from prometheus_client import make_asgi_app
 
 from llmgateway.api.completions import router as completions_router
 from llmgateway.api.health import router as health_router
+from llmgateway.cache import CacheManager, RedisCache
 from llmgateway.config import settings
 from llmgateway.providers import LLMGatewayProvider
 
@@ -106,6 +108,29 @@ async def _startup() -> None:
         max_retries=settings.llm_max_retries,
     )
 
+    # Initialise Redis-backed CacheManager.  A connection error here is
+    # non-fatal: the gateway will still serve requests, just without caching.
+    try:
+        redis_client = aioredis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=2,
+        )
+        app.state.cache_manager = CacheManager(
+            backend=RedisCache(redis_client),
+            default_ttl=settings.cache_ttl,
+        )
+        app.state.redis_client = redis_client
+        log.info(
+            "cache_initialized",
+            redis_url=settings.redis_url,
+            cache_ttl=settings.cache_ttl,
+        )
+    except Exception as exc:
+        log.warning("cache_init_failed", error=str(exc))
+        app.state.cache_manager = None
+        app.state.redis_client = None
+
     log.info(
         "LLM Gateway ready",
         host=settings.host,
@@ -120,4 +145,7 @@ async def _startup() -> None:
 @app.on_event("shutdown")
 async def _shutdown() -> None:
     log.info("LLM Gateway shutting down")
+    redis_client = getattr(app.state, "redis_client", None)
+    if redis_client is not None:
+        await redis_client.aclose()
     tracer_provider.shutdown()

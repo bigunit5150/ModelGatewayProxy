@@ -22,7 +22,9 @@
       "Bash(make lint:*)",
       "Bash(make test:*)",
       "Bash(pip install:*)",
-      "Bash(timeout 10 make:*)"
+      "Bash(timeout 10 make:*)",
+      "Bash(git reset:*)",
+      "Bash(git commit:*)"
     ],
     "additionalDirectories": [
       "/workspace/tests",

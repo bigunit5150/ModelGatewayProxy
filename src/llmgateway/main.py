@@ -17,6 +17,7 @@ from llmgateway.api.health import router as health_router
 from llmgateway.cache import CacheManager, EmbeddingModel, RedisCache
 from llmgateway.config import settings
 from llmgateway.providers import LLMGatewayProvider
+from llmgateway.ratelimit import RateLimiter
 
 # ---------------------------------------------------------------------------
 # Structured logging
@@ -126,17 +127,30 @@ async def _startup() -> None:
             semantic_max_entries=settings.semantic_cache_max_entries,
         )
         app.state.redis_client = redis_client
+
+        # Rate limiter shares the same Redis connection.
+        app.state.rate_limiter = RateLimiter(
+            redis_client=redis_client,
+            default_capacity=float(settings.rate_limit_default_capacity),
+            default_rate=settings.rate_limit_default_rate / 60.0,
+            enabled=settings.rate_limit_enabled,
+        )
+
         log.info(
             "cache_initialized",
             redis_url=settings.redis_url,
             cache_ttl=settings.cache_ttl,
             semantic_cache=settings.enable_semantic_cache,
             semantic_threshold=settings.semantic_cache_threshold,
+            rate_limiting=settings.rate_limit_enabled,
+            rate_limit_capacity=settings.rate_limit_default_capacity,
+            rate_limit_rate=settings.rate_limit_default_rate,
         )
     except Exception as exc:
         log.warning("cache_init_failed", error=str(exc))
         app.state.cache_manager = None
         app.state.redis_client = None
+        app.state.rate_limiter = None
 
     log.info(
         "LLM Gateway ready",

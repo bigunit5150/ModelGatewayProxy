@@ -54,5 +54,16 @@ class Settings(BaseSettings):
         description="Maximum number of embeddings to store per model in the semantic index",
     )
 
+    # Rate limiting
+    rate_limit_enabled: bool = Field(default=True, description="Enable token bucket rate limiting")
+    rate_limit_default_rate: float = Field(
+        default=10.0,
+        description="Default token refill rate in requests per minute",
+    )
+    rate_limit_default_capacity: int = Field(
+        default=20,
+        description="Default token bucket capacity (maximum burst size)",
+    )
+
 
 settings = Settings()

@@ -18,6 +18,7 @@ from llmgateway.providers import (
     RateLimitError,
     TimeoutError,
 )
+from llmgateway.ratelimit import RateLimiter, RateLimitResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -61,12 +62,11 @@ def _make_error_provider(exc: Exception) -> MagicMock:
 
 @pytest.fixture(autouse=True)
 def cleanup_provider():
-    """Remove app.state.provider and cache_manager after every test."""
+    """Remove app.state provider, cache_manager, and rate_limiter after every test."""
     yield
-    if hasattr(app.state, "provider"):
-        del app.state.provider
-    if hasattr(app.state, "cache_manager"):
-        del app.state.cache_manager
+    for attr in ("provider", "cache_manager", "rate_limiter"):
+        if hasattr(app.state, attr):
+            delattr(app.state, attr)
 
 
 @pytest.fixture
@@ -507,3 +507,143 @@ class TestCachePaths:
 
         mock_cache.cache_response.assert_called_once()
         mock_cache.cache_with_embedding.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------------------------
+
+import time as _time  # noqa: E402
+
+
+def _rl_result(*, allowed: bool = True, remaining: float = 19.0, retry_after: float = 0.0):
+    return RateLimitResult(
+        allowed=allowed,
+        retry_after=retry_after,
+        remaining=remaining,
+        reset_time=_time.time() + 60,
+        limit=20.0,
+    )
+
+
+class TestRateLimiting:
+    async def test_exceeded_returns_429(self, client: AsyncClient) -> None:
+        mock_rl = AsyncMock(spec=RateLimiter)
+        mock_rl.check_rate_limit.return_value = _rl_result(
+            allowed=False, remaining=0.0, retry_after=6.0
+        )
+        app.state.rate_limiter = mock_rl
+        app.state.provider = MagicMock()
+
+        response = await client.post(
+            "/v1/chat/completions", json={**_DEFAULT_BODY, "stream": False}
+        )
+
+        assert response.status_code == 429
+
+    async def test_exceeded_includes_retry_after_header(self, client: AsyncClient) -> None:
+        mock_rl = AsyncMock(spec=RateLimiter)
+        mock_rl.check_rate_limit.return_value = _rl_result(
+            allowed=False, remaining=0.0, retry_after=6.0
+        )
+        app.state.rate_limiter = mock_rl
+        app.state.provider = MagicMock()
+
+        response = await client.post(
+            "/v1/chat/completions", json={**_DEFAULT_BODY, "stream": False}
+        )
+
+        assert "Retry-After" in response.headers
+        assert int(response.headers["Retry-After"]) >= 6
+
+    async def test_exceeded_includes_ratelimit_headers(self, client: AsyncClient) -> None:
+        mock_rl = AsyncMock(spec=RateLimiter)
+        mock_rl.check_rate_limit.return_value = _rl_result(
+            allowed=False, remaining=0.0, retry_after=10.0
+        )
+        app.state.rate_limiter = mock_rl
+        app.state.provider = MagicMock()
+
+        response = await client.post(
+            "/v1/chat/completions", json={**_DEFAULT_BODY, "stream": False}
+        )
+
+        assert response.headers.get("X-RateLimit-Limit") == "20"
+        assert response.headers.get("X-RateLimit-Remaining") == "0"
+        assert "X-RateLimit-Reset" in response.headers
+
+    async def test_success_includes_ratelimit_headers(self, client: AsyncClient) -> None:
+        mock_rl = AsyncMock(spec=RateLimiter)
+        mock_rl.check_rate_limit.return_value = _rl_result(allowed=True, remaining=18.0)
+        app.state.rate_limiter = mock_rl
+        app.state.provider = _make_chunks(
+            CompletionChunk(content="ok", finish_reason="stop", usage=None, model=None)
+        )
+
+        response = await client.post(
+            "/v1/chat/completions", json={**_DEFAULT_BODY, "stream": False}
+        )
+
+        assert response.status_code == 200
+        assert response.headers.get("X-RateLimit-Limit") == "20"
+        assert response.headers.get("X-RateLimit-Remaining") == "18"
+        assert "X-RateLimit-Reset" in response.headers
+
+    async def test_no_rate_limiter_returns_200(self, client: AsyncClient) -> None:
+        """When rate_limiter is absent from app.state the endpoint still works."""
+        app.state.provider = _make_chunks(
+            CompletionChunk(content="ok", finish_reason="stop", usage=None, model=None)
+        )
+
+        response = await client.post(
+            "/v1/chat/completions", json={**_DEFAULT_BODY, "stream": False}
+        )
+
+        assert response.status_code == 200
+
+    async def test_user_field_used_as_user_id(self, client: AsyncClient) -> None:
+        mock_rl = AsyncMock(spec=RateLimiter)
+        mock_rl.check_rate_limit.return_value = _rl_result(allowed=True, remaining=19.0)
+        app.state.rate_limiter = mock_rl
+        app.state.provider = _make_chunks(
+            CompletionChunk(content="ok", finish_reason="stop", usage=None, model=None)
+        )
+
+        await client.post(
+            "/v1/chat/completions",
+            json={**_DEFAULT_BODY, "stream": False, "user": "alice"},
+        )
+
+        mock_rl.check_rate_limit.assert_called_once()
+        user_id_arg = mock_rl.check_rate_limit.call_args[0][0]
+        assert user_id_arg == "alice"
+
+    async def test_x_user_id_header_takes_precedence(self, client: AsyncClient) -> None:
+        mock_rl = AsyncMock(spec=RateLimiter)
+        mock_rl.check_rate_limit.return_value = _rl_result(allowed=True, remaining=19.0)
+        app.state.rate_limiter = mock_rl
+        app.state.provider = _make_chunks(
+            CompletionChunk(content="ok", finish_reason="stop", usage=None, model=None)
+        )
+
+        await client.post(
+            "/v1/chat/completions",
+            json={**_DEFAULT_BODY, "stream": False, "user": "body-user"},
+            headers={"X-User-ID": "header-user"},
+        )
+
+        user_id_arg = mock_rl.check_rate_limit.call_args[0][0]
+        assert user_id_arg == "header-user"
+
+    async def test_anonymous_fallback_when_no_user(self, client: AsyncClient) -> None:
+        mock_rl = AsyncMock(spec=RateLimiter)
+        mock_rl.check_rate_limit.return_value = _rl_result(allowed=True, remaining=19.0)
+        app.state.rate_limiter = mock_rl
+        app.state.provider = _make_chunks(
+            CompletionChunk(content="ok", finish_reason="stop", usage=None, model=None)
+        )
+
+        await client.post("/v1/chat/completions", json=_DEFAULT_BODY)
+
+        user_id_arg = mock_rl.check_rate_limit.call_args[0][0]
+        assert user_id_arg == "anonymous"

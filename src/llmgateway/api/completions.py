@@ -7,6 +7,7 @@ errors to the appropriate HTTP status codes.
 """
 
 import json
+import math
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -30,6 +31,7 @@ from llmgateway.providers import (
     RateLimitError,
     TimeoutError,
 )
+from llmgateway.ratelimit import RateLimiter
 
 router = APIRouter(prefix="/v1", tags=["completions"])
 
@@ -87,6 +89,28 @@ def get_cache_manager(request: Request) -> CacheManager | None:
     return getattr(request.app.state, "cache_manager", None)
 
 
+def get_rate_limiter(request: Request) -> RateLimiter | None:
+    """Return the shared :class:`RateLimiter` from ``app.state``, or ``None``."""
+    return getattr(request.app.state, "rate_limiter", None)
+
+
+def _extract_user_id(body: ChatCompletionRequest, request: Request) -> str:
+    """Resolve a stable user identifier for rate limiting.
+
+    Priority:
+    1. ``X-User-ID`` request header (explicit, takes precedence).
+    2. ``user`` field in the OpenAI-compatible request body.
+    3. Falls back to ``"anonymous"`` so unauthenticated callers are
+       rate-limited as a single shared bucket.
+    """
+    uid = request.headers.get("X-User-ID")
+    if uid:
+        return uid
+    if body.user:
+        return body.user
+    return "anonymous"
+
+
 # ---------------------------------------------------------------------------
 # Endpoint
 # ---------------------------------------------------------------------------
@@ -98,6 +122,7 @@ async def chat_completions(
     request: Request,
     provider: LLMGatewayProvider = Depends(get_provider),
     cache_manager: CacheManager | None = Depends(get_cache_manager),
+    rate_limiter: RateLimiter | None = Depends(get_rate_limiter),
 ) -> StreamingResponse | JSONResponse:
     """Generate a chat completion.
 
@@ -124,7 +149,6 @@ async def chat_completions(
         request_id=request_id,
         model=body.model,
         stream=body.stream,
-        user_id=body.user,
         provider=provider_name,
     )
 
@@ -135,12 +159,40 @@ async def chat_completions(
         "X-Cache-Type": "MISS",
     }
 
+    # ------------------------------------------------------------------
+    # Rate limiting — checked before any expensive work
+    # ------------------------------------------------------------------
+    user_id = _extract_user_id(body, request)
+    if rate_limiter is not None:
+        rl = await rate_limiter.check_rate_limit(user_id)
+        if not rl.allowed:
+            log.warning(
+                "rate_limit.exceeded",
+                user_id=user_id,
+                retry_after=rl.retry_after,
+                limit=rl.limit,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail={"message": "Rate limit exceeded", "type": "rate_limit_error"},
+                headers={
+                    **base_headers,
+                    "Retry-After": str(max(1, math.ceil(rl.retry_after))),
+                    "X-RateLimit-Limit": str(int(rl.limit)),
+                    "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Reset": str(int(rl.reset_time)),
+                },
+            )
+        # Attach rate limit state to every successful response.
+        base_headers["X-RateLimit-Limit"] = str(int(rl.limit))
+        base_headers["X-RateLimit-Remaining"] = str(int(rl.remaining))
+        base_headers["X-RateLimit-Reset"] = str(int(rl.reset_time))
+
     with _tracer.start_as_current_span("gateway.completions") as span:
         span.set_attribute("gen_ai.system", provider_name)
         span.set_attribute("gen_ai.request.model", body.model)
         span.set_attribute("llm.stream", body.stream)
-        if body.user:
-            span.set_attribute("enduser.id", body.user)
+        span.set_attribute("enduser.id", user_id)
 
         log.info("completion_request_start")
 

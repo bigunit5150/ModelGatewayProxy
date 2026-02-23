@@ -41,5 +41,18 @@ class Settings(BaseSettings):
         default=3600, description="TTL in seconds for cached responses (default 1 hour)"
     )
 
+    # Semantic cache
+    enable_semantic_cache: bool = Field(
+        default=True, description="Enable embedding-based semantic similarity cache"
+    )
+    semantic_cache_threshold: float = Field(
+        default=0.95,
+        description="Minimum cosine similarity [0, 1] to count as a semantic hit",
+    )
+    semantic_cache_max_entries: int = Field(
+        default=1000,
+        description="Maximum number of embeddings to store per model in the semantic index",
+    )
+
 
 settings = Settings()

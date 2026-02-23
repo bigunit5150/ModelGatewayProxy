@@ -18,7 +18,11 @@
       "Bash(export DATABASE_URL=\"postgresql+asyncpg://postgres:postgres@localhost:5432/llmgateway\")",
       "Bash(OTEL_EXPORTER_OTLP_ENDPOINT=\"http://localhost:4318\" REDIS_URL=\"redis://localhost:6379\" DATABASE_URL=\"postgresql+asyncpg://postgres:postgres@localhost:5432/llmgateway\" python -m pytest:*)",
       "Bash(env:*)",
-      "Bash(xargs:*)"
+      "Bash(xargs:*)",
+      "Bash(make lint:*)",
+      "Bash(make test:*)",
+      "Bash(pip install:*)",
+      "Bash(timeout 10 make:*)"
     ],
     "additionalDirectories": [
       "/workspace/tests",

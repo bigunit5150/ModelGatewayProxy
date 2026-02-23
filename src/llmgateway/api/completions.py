@@ -132,6 +132,7 @@ async def chat_completions(
         "X-Request-ID": request_id,
         "X-Provider": provider_name,
         "X-Cache-Status": "MISS",
+        "X-Cache-Type": "MISS",
     }
 
     with _tracer.start_as_current_span("gateway.completions") as span:
@@ -161,12 +162,9 @@ async def chat_completions(
             ) from exc
 
         # ------------------------------------------------------------------
-        # Streaming
+        # Streaming — no cache for streamed responses
         # ------------------------------------------------------------------
         if body.stream:
-            # The gateway.completions span covers request setup only;
-            # llm.generate / llm.api_call spans inside the provider carry
-            # the full call lifecycle.
             return StreamingResponse(
                 _stream_sse(provider, completion_request, request_id, created, log, start_time),
                 media_type="text/event-stream",
@@ -178,7 +176,7 @@ async def chat_completions(
             )
 
         # ------------------------------------------------------------------
-        # Non-streaming — check cache first
+        # Non-streaming — exact-match cache (fast path)
         # ------------------------------------------------------------------
 
         # CacheManager.get_cached_response() is internally fail-open: it
@@ -188,16 +186,52 @@ async def chat_completions(
             if cached is not None:
                 duration_ms = round((time.monotonic() - start_time) * 1000, 2)
                 span.set_attribute("cache.hit", True)
+                span.set_attribute("cache.type", "exact")
                 log.info(
                     "completion_request_complete",
                     duration_ms=duration_ms,
                     usage=cached.get("usage"),
                     cache_hit=True,
+                    cache_type="exact",
                 )
                 return JSONResponse(
                     content=cached,
-                    headers={**base_headers, "X-Cache-Status": "HIT"},
+                    headers={**base_headers, "X-Cache-Status": "HIT", "X-Cache-Type": "EXACT"},
                 )
+
+        # ------------------------------------------------------------------
+        # Non-streaming — semantic cache (fallback on exact miss)
+        # ------------------------------------------------------------------
+
+        if cache_manager is not None:
+            sem_result = await cache_manager.get_semantic_match(completion_request)
+            if sem_result is not None:
+                sem_cached, similarity = sem_result
+                duration_ms = round((time.monotonic() - start_time) * 1000, 2)
+                span.set_attribute("cache.hit", True)
+                span.set_attribute("cache.type", "semantic")
+                span.set_attribute("cache.similarity", round(similarity, 4))
+                log.info(
+                    "completion_request_complete",
+                    duration_ms=duration_ms,
+                    usage=sem_cached.get("usage"),
+                    cache_hit=True,
+                    cache_type="semantic",
+                    similarity=round(similarity, 4),
+                )
+                return JSONResponse(
+                    content=sem_cached,
+                    headers={
+                        **base_headers,
+                        "X-Cache-Status": "HIT",
+                        "X-Cache-Type": "SEMANTIC",
+                        "X-Cache-Similarity": str(round(similarity, 4)),
+                    },
+                )
+
+        # ------------------------------------------------------------------
+        # Cache miss — call the provider
+        # ------------------------------------------------------------------
 
         try:
             response_data = await _build_json_response(
@@ -223,10 +257,10 @@ async def chat_completions(
                 headers=error_headers,
             ) from exc
 
-        # Store the response in cache (fail-open: errors are swallowed inside
-        # CacheManager.cache_response()).
+        # Store in both exact-match cache and semantic index (both fail-open).
         if cache_manager is not None:
             await cache_manager.cache_response(completion_request, response_data)
+            await cache_manager.cache_with_embedding(completion_request, response_data)
 
         usage = response_data.get("usage", {})
         duration_ms = round((time.monotonic() - start_time) * 1000, 2)

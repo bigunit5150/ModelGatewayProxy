@@ -26,6 +26,8 @@ dependencies = [
     "structlog>=24.1",
     "tenacity>=8.2",
     "python-jose[cryptography]>=3.3",
+    "sentence-transformers>=2.2",
+    "numpy>=1.24",
 ]
 
 [project.optional-dependencies]

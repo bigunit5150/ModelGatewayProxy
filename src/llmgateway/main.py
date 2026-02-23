@@ -14,7 +14,7 @@ from prometheus_client import make_asgi_app
 
 from llmgateway.api.completions import router as completions_router
 from llmgateway.api.health import router as health_router
-from llmgateway.cache import CacheManager, RedisCache
+from llmgateway.cache import CacheManager, EmbeddingModel, RedisCache
 from llmgateway.config import settings
 from llmgateway.providers import LLMGatewayProvider
 
@@ -116,15 +116,22 @@ async def _startup() -> None:
             decode_responses=True,
             socket_connect_timeout=2,
         )
+        embedding_model = EmbeddingModel() if settings.enable_semantic_cache else None
         app.state.cache_manager = CacheManager(
             backend=RedisCache(redis_client),
             default_ttl=settings.cache_ttl,
+            redis_client=redis_client,
+            embedding_model=embedding_model,
+            semantic_threshold=settings.semantic_cache_threshold,
+            semantic_max_entries=settings.semantic_cache_max_entries,
         )
         app.state.redis_client = redis_client
         log.info(
             "cache_initialized",
             redis_url=settings.redis_url,
             cache_ttl=settings.cache_ttl,
+            semantic_cache=settings.enable_semantic_cache,
+            semantic_threshold=settings.semantic_cache_threshold,
         )
     except Exception as exc:
         log.warning("cache_init_failed", error=str(exc))

@@ -2,7 +2,7 @@
 
 import json
 from collections.abc import AsyncGenerator
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -61,10 +61,12 @@ def _make_error_provider(exc: Exception) -> MagicMock:
 
 @pytest.fixture(autouse=True)
 def cleanup_provider():
-    """Remove app.state.provider after every test to prevent cross-test leakage."""
+    """Remove app.state.provider and cache_manager after every test."""
     yield
     if hasattr(app.state, "provider"):
         del app.state.provider
+    if hasattr(app.state, "cache_manager"):
+        del app.state.cache_manager
 
 
 @pytest.fixture
@@ -416,3 +418,92 @@ class TestFormatChunk:
         chunk = CompletionChunk(content="x", finish_reason=None, usage=None, model=None)
         data = _format_chunk(chunk, "req-1", 1234, "model")
         assert data["object"] == "chat.completion.chunk"
+
+
+# ---------------------------------------------------------------------------
+# Cache hit / miss paths
+# ---------------------------------------------------------------------------
+
+_CACHED_RESPONSE: dict = {
+    "id": "chatcmpl-cached",
+    "object": "chat.completion",
+    "created": 1000,
+    "model": "claude-haiku-4-5-20251001",
+    "choices": [
+        {
+            "index": 0,
+            "message": {"role": "assistant", "content": "cached!"},
+            "finish_reason": "stop",
+        }
+    ],
+    "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+}
+
+
+class TestCachePaths:
+    async def test_exact_cache_hit_returns_hit_headers(self, client: AsyncClient) -> None:
+        mock_cache = AsyncMock()
+        mock_cache.get_cached_response.return_value = _CACHED_RESPONSE
+        app.state.cache_manager = mock_cache
+        app.state.provider = MagicMock()  # should not be reached
+
+        response = await client.post(
+            "/v1/chat/completions", json={**_DEFAULT_BODY, "stream": False}
+        )
+
+        assert response.status_code == 200
+        assert response.headers.get("X-Cache-Status") == "HIT"
+        assert response.headers.get("X-Cache-Type") == "EXACT"
+        assert response.json()["choices"][0]["message"]["content"] == "cached!"
+
+    async def test_semantic_cache_hit_returns_semantic_headers(self, client: AsyncClient) -> None:
+        mock_cache = AsyncMock()
+        mock_cache.get_cached_response.return_value = None  # exact miss
+        mock_cache.get_semantic_match.return_value = (_CACHED_RESPONSE, 0.97)
+        app.state.cache_manager = mock_cache
+        app.state.provider = MagicMock()
+
+        response = await client.post(
+            "/v1/chat/completions", json={**_DEFAULT_BODY, "stream": False}
+        )
+
+        assert response.status_code == 200
+        assert response.headers.get("X-Cache-Status") == "HIT"
+        assert response.headers.get("X-Cache-Type") == "SEMANTIC"
+        assert response.headers.get("X-Cache-Similarity") == "0.97"
+        assert response.json()["choices"][0]["message"]["content"] == "cached!"
+
+    async def test_cache_miss_type_header_is_miss(self, client: AsyncClient) -> None:
+        mock_cache = AsyncMock()
+        mock_cache.get_cached_response.return_value = None
+        mock_cache.get_semantic_match.return_value = None
+        app.state.cache_manager = mock_cache
+        app.state.provider = _make_chunks(
+            CompletionChunk(content="fresh", finish_reason="stop", usage=None, model=None)
+        )
+
+        response = await client.post(
+            "/v1/chat/completions", json={**_DEFAULT_BODY, "stream": False}
+        )
+
+        assert response.status_code == 200
+        assert response.headers.get("X-Cache-Type") == "MISS"
+
+    async def test_cache_miss_stores_in_both_caches(self, client: AsyncClient) -> None:
+        mock_cache = AsyncMock()
+        mock_cache.get_cached_response.return_value = None
+        mock_cache.get_semantic_match.return_value = None
+        app.state.cache_manager = mock_cache
+        app.state.provider = _make_chunks(
+            CompletionChunk(
+                content="fresh",
+                finish_reason="stop",
+                usage={"input_tokens": 2, "output_tokens": 2},
+                model=None,
+            )
+        )
+
+        await client.post("/v1/chat/completions", json={**_DEFAULT_BODY, "stream": False})
+
+        mock_cache.cache_response.assert_called_once()
+        mock_cache.cache_with_embedding.assert_called_once()

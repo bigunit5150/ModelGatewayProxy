@@ -12,10 +12,12 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from prometheus_client import make_asgi_app
 
+from llmgateway.api.admin import router as admin_router
 from llmgateway.api.completions import router as completions_router
 from llmgateway.api.health import router as health_router
 from llmgateway.cache import CacheManager, EmbeddingModel, RedisCache
 from llmgateway.config import settings
+from llmgateway.cost import CostTracker
 from llmgateway.providers import LLMGatewayProvider
 from llmgateway.ratelimit import RateLimiter
 
@@ -79,6 +81,7 @@ app.mount("/metrics", metrics_app)
 # Routers
 app.include_router(health_router)
 app.include_router(completions_router)
+app.include_router(admin_router)
 
 # Instrument *after* routes are registered
 FastAPIInstrumentor.instrument_app(app, tracer_provider=tracer_provider)
@@ -108,6 +111,15 @@ async def _startup() -> None:
         timeout=settings.llm_timeout,
         max_retries=settings.llm_max_retries,
     )
+
+    # Initialise the cost tracker.  A connection error is non-fatal; the
+    # gateway will serve requests without persisting usage records.
+    try:
+        app.state.cost_tracker = CostTracker(database_url=settings.database_url)
+        log.info("cost_tracker_initialized", database_url=settings.database_url)
+    except Exception as exc:
+        log.warning("cost_tracker_init_failed", error=str(exc))
+        app.state.cost_tracker = None
 
     # Initialise Redis-backed CacheManager.  A connection error here is
     # non-fatal: the gateway will still serve requests, just without caching.
@@ -169,4 +181,7 @@ async def _shutdown() -> None:
     redis_client = getattr(app.state, "redis_client", None)
     if redis_client is not None:
         await redis_client.aclose()
+    cost_tracker = getattr(app.state, "cost_tracker", None)
+    if cost_tracker is not None:
+        await cost_tracker.close()
     tracer_provider.shutdown()

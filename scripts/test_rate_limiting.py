@@ -649,13 +649,13 @@ async def test_http_exhaustion_returns_429(client: httpx.AsyncClient) -> None:
                 retry_after = r.headers.get("Retry-After", "(missing)")
                 rl_remaining = r.headers.get("X-RateLimit-Remaining", "(missing)")
                 _info(
-                    f"429 received on request {i+1}  "
+                    f"429 received on request {i + 1}  "
                     f"Retry-After={retry_after!r}  "
                     f"X-RateLimit-Remaining={rl_remaining!r}"
                 )
                 break
         except Exception as exc:
-            _fail(f"request {i+1} failed", str(exc))
+            _fail(f"request {i + 1} failed", str(exc))
             return
 
     if 429 in statuses:

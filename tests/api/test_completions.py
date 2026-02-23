@@ -8,6 +8,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from llmgateway.api.completions import _format_chunk, _provider_from_model
+from llmgateway.cost import CostTracker
 from llmgateway.main import app
 from llmgateway.providers import (
     AuthError,
@@ -62,9 +63,9 @@ def _make_error_provider(exc: Exception) -> MagicMock:
 
 @pytest.fixture(autouse=True)
 def cleanup_provider():
-    """Remove app.state provider, cache_manager, and rate_limiter after every test."""
+    """Remove app.state provider, cache_manager, rate_limiter, cost_tracker after every test."""
     yield
-    for attr in ("provider", "cache_manager", "rate_limiter"):
+    for attr in ("provider", "cache_manager", "rate_limiter", "cost_tracker"):
         if hasattr(app.state, attr):
             delattr(app.state, attr)
 
@@ -647,3 +648,93 @@ class TestRateLimiting:
 
         user_id_arg = mock_rl.check_rate_limit.call_args[0][0]
         assert user_id_arg == "anonymous"
+
+
+# ---------------------------------------------------------------------------
+# Cost tracking
+# ---------------------------------------------------------------------------
+
+
+def _mock_cost_tracker() -> CostTracker:
+    tracker = AsyncMock(spec=CostTracker)
+    tracker.record_usage = AsyncMock(return_value=None)
+    tracker.get_daily_cost = AsyncMock(return_value=0.5)
+    return tracker
+
+
+class TestCostTracking:
+    async def test_x_cost_header_present_on_live_response(self, client: AsyncClient) -> None:
+        app.state.provider = _make_chunks(
+            CompletionChunk(
+                content="hi",
+                finish_reason="stop",
+                usage={"input_tokens": 10, "output_tokens": 5},
+                model="claude-haiku-4-5-20251001",
+            )
+        )
+        response = await client.post(
+            "/v1/chat/completions", json={**_DEFAULT_BODY, "stream": False}
+        )
+        assert response.status_code == 200
+        assert "X-Cost" in response.headers
+
+    async def test_x_cost_is_numeric(self, client: AsyncClient) -> None:
+        app.state.provider = _make_chunks(
+            CompletionChunk(
+                content="hi",
+                finish_reason="stop",
+                usage={"input_tokens": 100, "output_tokens": 50},
+                model="claude-haiku-4-5-20251001",
+            )
+        )
+        response = await client.post(
+            "/v1/chat/completions", json={**_DEFAULT_BODY, "stream": False}
+        )
+        cost_val = float(response.headers["X-Cost"])
+        assert cost_val >= 0.0
+
+    async def test_x_cost_zero_when_no_usage(self, client: AsyncClient) -> None:
+        app.state.provider = _make_chunks(
+            CompletionChunk(content="hi", finish_reason="stop", usage=None, model=None)
+        )
+        response = await client.post(
+            "/v1/chat/completions", json={**_DEFAULT_BODY, "stream": False}
+        )
+        assert float(response.headers["X-Cost"]) == 0.0
+
+    async def test_x_cost_present_on_exact_cache_hit(self, client: AsyncClient) -> None:
+        mock_cache = AsyncMock()
+        mock_cache.get_cached_response.return_value = _CACHED_RESPONSE
+        app.state.cache_manager = mock_cache
+        app.state.provider = MagicMock()
+
+        response = await client.post(
+            "/v1/chat/completions", json={**_DEFAULT_BODY, "stream": False}
+        )
+
+        assert "X-Cost" in response.headers
+        assert response.headers["X-Cost"] == "0.00000000"
+
+    async def test_x_cost_present_on_semantic_cache_hit(self, client: AsyncClient) -> None:
+        mock_cache = AsyncMock()
+        mock_cache.get_cached_response.return_value = None
+        mock_cache.get_semantic_match.return_value = (_CACHED_RESPONSE, 0.97)
+        app.state.cache_manager = mock_cache
+        app.state.provider = MagicMock()
+
+        response = await client.post(
+            "/v1/chat/completions", json={**_DEFAULT_BODY, "stream": False}
+        )
+
+        assert "X-Cost" in response.headers
+        assert response.headers["X-Cost"] == "0.00000000"
+
+    async def test_no_cost_tracker_still_returns_200(self, client: AsyncClient) -> None:
+        """Endpoint works fine without a cost_tracker in app.state."""
+        app.state.provider = _make_chunks(
+            CompletionChunk(content="ok", finish_reason="stop", usage=None, model=None)
+        )
+        response = await client.post(
+            "/v1/chat/completions", json={**_DEFAULT_BODY, "stream": False}
+        )
+        assert response.status_code == 200

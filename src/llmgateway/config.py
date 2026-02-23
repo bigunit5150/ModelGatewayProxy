@@ -65,5 +65,17 @@ class Settings(BaseSettings):
         description="Default token bucket capacity (maximum burst size)",
     )
 
+    # Cost tracking
+    daily_cost_alert_threshold: float = Field(
+        default=10.0,
+        description="Log a warning when daily spend (USD) exceeds this value",
+    )
+
+    # Admin API
+    admin_api_key: str | None = Field(
+        default=None,
+        description="Secret key required in X-Admin-Key header for admin endpoints",
+    )
+
 
 settings = Settings()

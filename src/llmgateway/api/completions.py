@@ -6,6 +6,7 @@ types, streams Server-Sent Events for streaming requests, and maps gateway
 errors to the appropriate HTTP status codes.
 """
 
+import asyncio
 import json
 import math
 import time
@@ -18,9 +19,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
+from prometheus_client import Counter
 from pydantic import BaseModel, Field
 
 from llmgateway.cache import CacheManager
+from llmgateway.config import settings
+from llmgateway.cost import CostTracker, calculate_cost
 from llmgateway.providers import (
     AuthError,
     CompletionRequest,
@@ -37,6 +41,16 @@ router = APIRouter(prefix="/v1", tags=["completions"])
 
 _log = structlog.get_logger(__name__)
 _tracer = trace.get_tracer(__name__)
+
+# ---------------------------------------------------------------------------
+# Prometheus metrics
+# ---------------------------------------------------------------------------
+
+_COST_TOTAL = Counter(
+    "llm_cost_usd_total",
+    "Cumulative estimated cost of LLM requests in USD",
+    ["model", "user_id"],
+)
 
 # ---------------------------------------------------------------------------
 # HTTP status codes for each gateway error type
@@ -94,6 +108,11 @@ def get_rate_limiter(request: Request) -> RateLimiter | None:
     return getattr(request.app.state, "rate_limiter", None)
 
 
+def get_cost_tracker(request: Request) -> CostTracker | None:
+    """Return the shared :class:`CostTracker` from ``app.state``, or ``None``."""
+    return getattr(request.app.state, "cost_tracker", None)
+
+
 def _extract_user_id(body: ChatCompletionRequest, request: Request) -> str:
     """Resolve a stable user identifier for rate limiting.
 
@@ -123,6 +142,7 @@ async def chat_completions(
     provider: LLMGatewayProvider = Depends(get_provider),
     cache_manager: CacheManager | None = Depends(get_cache_manager),
     rate_limiter: RateLimiter | None = Depends(get_rate_limiter),
+    cost_tracker: CostTracker | None = Depends(get_cost_tracker),
 ) -> StreamingResponse | JSONResponse:
     """Generate a chat completion.
 
@@ -246,9 +266,25 @@ async def chat_completions(
                     cache_hit=True,
                     cache_type="exact",
                 )
+                _cached_usage = cached.get("usage") or {}
+                _schedule_cost_record(
+                    cost_tracker,
+                    user_id,
+                    body.model,
+                    input_tokens=_cached_usage.get("prompt_tokens", 0),
+                    output_tokens=_cached_usage.get("completion_tokens", 0),
+                    cost_usd=0.0,
+                    cached=True,
+                    cache_type="EXACT",
+                )
                 return JSONResponse(
                     content=cached,
-                    headers={**base_headers, "X-Cache-Status": "HIT", "X-Cache-Type": "EXACT"},
+                    headers={
+                        **base_headers,
+                        "X-Cache-Status": "HIT",
+                        "X-Cache-Type": "EXACT",
+                        "X-Cost": "0.00000000",
+                    },
                 )
 
         # ------------------------------------------------------------------
@@ -271,6 +307,17 @@ async def chat_completions(
                     cache_type="semantic",
                     similarity=round(similarity, 4),
                 )
+                _sem_usage = sem_cached.get("usage") or {}
+                _schedule_cost_record(
+                    cost_tracker,
+                    user_id,
+                    body.model,
+                    input_tokens=_sem_usage.get("prompt_tokens", 0),
+                    output_tokens=_sem_usage.get("completion_tokens", 0),
+                    cost_usd=0.0,
+                    cached=True,
+                    cache_type="SEMANTIC",
+                )
                 return JSONResponse(
                     content=sem_cached,
                     headers={
@@ -278,6 +325,7 @@ async def chat_completions(
                         "X-Cache-Status": "HIT",
                         "X-Cache-Type": "SEMANTIC",
                         "X-Cache-Similarity": str(round(similarity, 4)),
+                        "X-Cost": "0.00000000",
                     },
                 )
 
@@ -315,6 +363,23 @@ async def chat_completions(
             await cache_manager.cache_with_embedding(completion_request, response_data)
 
         usage = response_data.get("usage", {})
+        input_tokens = usage.get("prompt_tokens", 0)
+        output_tokens = usage.get("completion_tokens", 0)
+        cost_usd = calculate_cost(body.model, input_tokens, output_tokens)
+        _COST_TOTAL.labels(model=body.model, user_id=user_id).inc(cost_usd)
+        base_headers["X-Cost"] = f"{cost_usd:.8f}"
+
+        _schedule_cost_record(
+            cost_tracker,
+            user_id,
+            body.model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+            cached=False,
+            cache_type=None,
+        )
+
         duration_ms = round((time.monotonic() - start_time) * 1000, 2)
         log.info("completion_request_complete", duration_ms=duration_ms, usage=usage)
 
@@ -438,6 +503,71 @@ def _format_chunk(
         }
 
     return data
+
+
+def _schedule_cost_record(
+    cost_tracker: CostTracker | None,
+    user_id: str,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    *,
+    cost_usd: float,
+    cached: bool,
+    cache_type: str | None,
+) -> None:
+    """Fire-and-forget: schedule a DB write for the request's usage data.
+
+    The task is detached from the request lifecycle so the response is never
+    delayed by a slow database write.  All exceptions are handled inside the
+    coroutine itself.
+    """
+    if cost_tracker is None:
+        return
+    asyncio.create_task(
+        _record_cost_async(
+            cost_tracker,
+            user_id,
+            model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+            cached=cached,
+            cache_type=cache_type,
+        )
+    )
+
+
+async def _record_cost_async(
+    cost_tracker: CostTracker,
+    user_id: str,
+    model: str,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cost_usd: float,
+    cached: bool,
+    cache_type: str | None,
+) -> None:
+    """Write the usage record to the DB and check the daily budget alert."""
+    await cost_tracker.record_usage(
+        user_id=user_id,
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost_usd=cost_usd,
+        cached=cached,
+        cache_type=cache_type,
+    )
+    if cost_usd > 0:
+        daily = await cost_tracker.get_daily_cost()
+        threshold = settings.daily_cost_alert_threshold
+        if daily > threshold:
+            _log.warning(
+                "cost.daily_alert",
+                daily_cost_usd=round(daily, 4),
+                threshold_usd=threshold,
+            )
 
 
 def _provider_from_model(model: str) -> str:

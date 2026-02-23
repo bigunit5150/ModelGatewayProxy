@@ -24,7 +24,8 @@
       "Bash(pip install:*)",
       "Bash(timeout 10 make:*)",
       "Bash(git reset:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(ruff format:*)"
     ],
     "additionalDirectories": [
       "/workspace/tests",

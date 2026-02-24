@@ -1,10 +1,19 @@
 # LLM Gateway Learning Plan - Phase 1 (Final Version)
 ## Claude Code + VS Code + Dev Containers Edition
 
-**Status:** In Progress
+**Status:** Week 2 In Progress — Caching, Rate Limiting & Cost Tracking
 **Environment:** Docker Dev Containers (macOS/Windows)
 **Tools:** VS Code + Claude Code Extension + Dev Containers
 **Timeline:** 3-4 weeks to production deployment
+
+### Progress Snapshot (as of 2026-02-24)
+| Week | Topic | Status |
+|------|-------|--------|
+| 0 | Environment Setup | ✅ Complete |
+| 1 | Provider Abstraction (LiteLLM) | ✅ Complete |
+| 2 | Caching, Rate Limiting, Cost Tracking | 🔄 In Progress |
+| 3 | Observability & Production Deployment | ⏳ Upcoming |
+| 4 | Advanced Features (optional) | ⏳ Upcoming |
 
 ---
 
@@ -208,424 +217,59 @@ observability. This saved 2 weeks while demonstrating good architectural judgmen
 
 **Claude Code Prompt:**
 ```
-I'm integrating LiteLLM into my LLM Gateway to handle multi-provider support. Create a thin wrapper around LiteLLM with custom error handling and observability.
+I'm integrating LiteLLM into my LLM Gateway to handle multi-provider support.
 
 CONTEXT:
-- Project: Production LLM Gateway
-- Location: src/llmgateway/providers/
-- Decision: Use LiteLLM for provider abstraction (pragmatic choice)
-- Focus: Error mapping, observability, and retry logic on top of LiteLLM
+- Production LLM Gateway in /workspace
+- Decision: Use LiteLLM (don't reinvent the wheel)
+- Focus: Custom error handling + observability on top of LiteLLM
 
-DESIGN RATIONALE:
-LiteLLM already handles:
+WHAT LITELLM GIVES US:
 - Multi-provider support (OpenAI, Anthropic, Together, Groq, etc.)
 - Request format standardization
-- Token counting (tiktoken for OpenAI)
-- Basic error handling
+- Token counting
 
-We add:
-- Custom error types for our gateway
+WHAT WE BUILD:
+- Custom error type hierarchy
+- Enhanced retry logic with exponential backoff
 - OpenTelemetry instrumentation
 - Structured logging with correlation IDs
-- Enhanced retry logic with exponential backoff
 - Request/response validation
 
 CREATE:
 
-1. src/llmgateway/providers/__init__.py:
-   - Export: CompletionRequest, CompletionChunk, CompletionResponse, LLMGatewayProvider
-   - Export: ProviderError, RateLimitError, AuthError, TimeoutError, InvalidRequestError, ProviderUnavailableError
+1. src/llmgateway/providers/models.py
+   - CompletionRequest dataclass: model, messages, temperature, max_tokens, stream, user_id
+   - CompletionChunk dataclass: content, finish_reason, usage (tokens dict), model
+   - CompletionResponse dataclass: full non-streaming response
+   - Validation in __post_init__: temperature 0-2, non-empty messages
 
-2. src/llmgateway/providers/models.py:
+2. src/llmgateway/providers/errors.py
+   - ProviderError base exception: message, provider name, original error
+   - RateLimitError: add retry_after field
+   - AuthError, TimeoutError, InvalidRequestError, ProviderUnavailableError
 
-   @dataclass(frozen=True)
-   class CompletionRequest:
-       model: str
-       messages: list[dict[str, str]]
-       temperature: float = 0.7
-       max_tokens: int | None = None
-       stream: bool = False
-       user_id: str | None = None  # For rate limiting
+3. src/llmgateway/providers/litellm_wrapper.py
+   - LLMGatewayProvider class wrapping litellm.acompletion
+   - async generate(request) → AsyncIterator[CompletionChunk]
+   - Map litellm exceptions to our error types
+   - Use tenacity: retry on transient errors (RateLimit, Timeout), not permanent (Auth, InvalidRequest)
+   - Add OpenTelemetry spans with attributes: model, stream, temperature, user_id
+   - Structured logging (structlog): request start/end/errors
+   - count_tokens() method using litellm.token_counter
+   - Handle both streaming and non-streaming responses
 
-       def __post_init__(self):
-           # Validate model name format
-           # Validate messages structure (non-empty, valid roles)
-           # Validate temperature range (0-2)
-           # Raise InvalidRequestError if validation fails
+4. src/llmgateway/providers/__init__.py
+   - Export all key classes
 
-   @dataclass(frozen=True)
-   class CompletionChunk:
-       content: str
-       finish_reason: str | None = None
-       usage: dict[str, int] | None = None  # {"input_tokens": X, "output_tokens": Y}
-       model: str | None = None
-
-   @dataclass(frozen=True)
-   class CompletionResponse:
-       """Full response for non-streaming requests"""
-       content: str
-       usage: dict[str, int]
-       model: str
-       finish_reason: str
-
-3. src/llmgateway/providers/errors.py:
-
-   Complete exception hierarchy:
-
-   class ProviderError(Exception):
-       """Base exception for all provider errors"""
-       def __init__(self, message: str, provider: str | None = None,
-                    original_error: Exception | None = None):
-           self.message = message
-           self.provider = provider
-           self.original_error = original_error
-           super().__init__(message)
-
-   class RateLimitError(ProviderError):
-       """Raised when provider rate limit exceeded (429)"""
-       def __init__(self, message: str, retry_after: float | None = None, **kwargs):
-           super().__init__(message, **kwargs)
-           self.retry_after = retry_after
-
-   class AuthError(ProviderError):
-       """Raised for authentication failures (401, 403)"""
-       pass
-
-   class TimeoutError(ProviderError):
-       """Raised when request times out"""
-       pass
-
-   class InvalidRequestError(ProviderError):
-       """Raised for malformed requests (400)"""
-       pass
-
-   class ProviderUnavailableError(ProviderError):
-       """Raised when provider is down (502, 503, 504)"""
-       pass
-
-4. src/llmgateway/providers/litellm_wrapper.py:
-
-   Main provider class wrapping LiteLLM:
-
-   class LLMGatewayProvider:
-       """
-       Wrapper around LiteLLM providing:
-       - Standardized error handling
-       - OpenTelemetry instrumentation
-       - Structured logging
-       - Enhanced retry logic
-
-       Example:
-       ```python
-       provider = LLMGatewayProvider()
-       request = CompletionRequest(
-           model="gpt-4o",
-           messages=[{"role": "user", "content": "Hello"}],
-           stream=True
-       )
-       async for chunk in provider.generate(request):
-           print(chunk.content)
-       ```
-       """
-
-       def __init__(
-           self,
-           timeout: int = 60,
-           max_retries: int = 3,
-           enable_fallback: bool = False
-       ):
-           # Initialize LiteLLM settings
-           # Set timeout using litellm.timeout
-           # Configure retry behavior
-           # Initialize OpenTelemetry tracer (from opentelemetry import trace)
-           # Initialize structlog logger
-
-       async def generate(
-           self,
-           request: CompletionRequest
-       ) -> AsyncIterator[CompletionChunk]:
-           """
-           Generate completion using LiteLLM.
-
-           Automatically handles:
-           - Provider selection based on model name
-           - Request format conversion
-           - Streaming and non-streaming responses
-           - Error mapping to our custom types
-
-           Args:
-               request: Completion request parameters
-
-           Yields:
-               CompletionChunk: Streamed response chunks
-
-           Raises:
-               RateLimitError: When rate limited by provider
-               AuthError: When API key is invalid
-               TimeoutError: When request times out
-               InvalidRequestError: When request is malformed
-               ProviderUnavailableError: When provider is down
-           """
-
-           # Start OpenTelemetry span
-           with tracer.start_as_current_span("litellm.generate") as span:
-               span.set_attribute("model", request.model)
-               span.set_attribute("stream", request.stream)
-               span.set_attribute("temperature", request.temperature)
-               if request.user_id:
-                   span.set_attribute("user_id", request.user_id)
-
-               # Log request start with structlog
-               logger.info("llm_request_start",
-                          model=request.model,
-                          stream=request.stream,
-                          user_id=request.user_id,
-                          temperature=request.temperature)
-
-               try:
-                   # Convert to LiteLLM format
-                   litellm_params = self._to_litellm_format(request)
-
-                   # Call LiteLLM with retry decorator
-                   if request.stream:
-                       async for chunk in self._generate_streaming(litellm_params, span):
-                           yield chunk
-                   else:
-                       response = await self._generate_non_streaming(litellm_params, span)
-                       yield response
-
-               except Exception as e:
-                   # Log error
-                   logger.error("llm_request_error",
-                               model=request.model,
-                               error=str(e),
-                               error_type=type(e).__name__)
-                   # Map LiteLLM exceptions to our error types
-                   raise self._map_error(e, request.model)
-
-               finally:
-                   # Log request completion with duration
-                   logger.info("llm_request_complete",
-                              model=request.model,
-                              duration_ms=span.get_span_context().trace_id if span else 0)
-
-       @retry(
-           stop=stop_after_attempt(3),
-           retry=retry_if_exception_type((RateLimitError, TimeoutError, ProviderUnavailableError)),
-           wait=wait_exponential(multiplier=1, min=2, max=30),
-           before_sleep=before_sleep_log(logger, logging.WARNING)
-       )
-       async def _generate_streaming(
-           self,
-           litellm_params: dict,
-           parent_span
-       ) -> AsyncIterator[CompletionChunk]:
-           """Internal method: streaming generation with retries"""
-
-           from litellm import acompletion
-
-           with tracer.start_as_current_span("litellm.api_call", parent_span) as span:
-               span.set_attribute("call_type", "streaming")
-
-               response = await acompletion(**litellm_params, stream=True)
-
-               async for chunk in response:
-                   # Convert LiteLLM chunk format to our CompletionChunk
-                   parsed_chunk = self._parse_chunk(chunk)
-                   if parsed_chunk.content or parsed_chunk.finish_reason:
-                       yield parsed_chunk
-
-       @retry(
-           stop=stop_after_attempt(3),
-           retry=retry_if_exception_type((RateLimitError, TimeoutError, ProviderUnavailableError)),
-           wait=wait_exponential(multiplier=1, min=2, max=30),
-           before_sleep=before_sleep_log(logger, logging.WARNING)
-       )
-       async def _generate_non_streaming(
-           self,
-           litellm_params: dict,
-           parent_span
-       ) -> CompletionChunk:
-           """Internal method: non-streaming generation with retries"""
-
-           from litellm import acompletion
-
-           with tracer.start_as_current_span("litellm.api_call", parent_span) as span:
-               span.set_attribute("call_type", "non_streaming")
-
-               response = await acompletion(**litellm_params, stream=False)
-
-               # Convert to our CompletionChunk format
-               return self._parse_response(response)
-
-       def _to_litellm_format(self, request: CompletionRequest) -> dict:
-           """Convert our request format to LiteLLM format"""
-           params = {
-               "model": request.model,
-               "messages": request.messages,
-               "temperature": request.temperature,
-               "stream": request.stream,
-           }
-           if request.max_tokens:
-               params["max_tokens"] = request.max_tokens
-           return params
-
-       def _parse_chunk(self, litellm_chunk) -> CompletionChunk:
-           """Convert LiteLLM streaming chunk to our format"""
-           # LiteLLM chunk structure: chunk.choices[0].delta.content
-           content = ""
-           finish_reason = None
-           usage = None
-
-           if hasattr(litellm_chunk, 'choices') and len(litellm_chunk.choices) > 0:
-               choice = litellm_chunk.choices[0]
-               if hasattr(choice, 'delta') and hasattr(choice.delta, 'content'):
-                   content = choice.delta.content or ""
-               if hasattr(choice, 'finish_reason'):
-                   finish_reason = choice.finish_reason
-
-           # Usage appears in final chunk for some providers
-           if hasattr(litellm_chunk, 'usage') and litellm_chunk.usage:
-               usage = {
-                   "input_tokens": litellm_chunk.usage.prompt_tokens,
-                   "output_tokens": litellm_chunk.usage.completion_tokens
-               }
-
-           return CompletionChunk(
-               content=content,
-               finish_reason=finish_reason,
-               usage=usage,
-               model=getattr(litellm_chunk, 'model', None)
-           )
-
-       def _parse_response(self, litellm_response) -> CompletionChunk:
-           """Convert LiteLLM non-streaming response to our format"""
-           content = litellm_response.choices[0].message.content
-           finish_reason = litellm_response.choices[0].finish_reason
-
-           usage = {
-               "input_tokens": litellm_response.usage.prompt_tokens,
-               "output_tokens": litellm_response.usage.completion_tokens
-           }
-
-           return CompletionChunk(
-               content=content,
-               finish_reason=finish_reason,
-               usage=usage,
-               model=litellm_response.model
-           )
-
-       def _map_error(self, error: Exception, model: str) -> ProviderError:
-           """
-           Map LiteLLM exceptions to our custom error types.
-
-           LiteLLM error types:
-           - litellm.RateLimitError → RateLimitError
-           - litellm.AuthenticationError → AuthError
-           - litellm.Timeout → TimeoutError
-           - litellm.BadRequestError → InvalidRequestError
-           - litellm.ServiceUnavailableError → ProviderUnavailableError
-           - litellm.APIError → ProviderError
-           """
-
-           import litellm
-
-           provider = self._extract_provider(model)
-
-           if isinstance(error, litellm.RateLimitError):
-               # Try to extract retry_after from error
-               retry_after = getattr(error, 'retry_after', None)
-               return RateLimitError(
-                   message=str(error),
-                   provider=provider,
-                   retry_after=retry_after,
-                   original_error=error
-               )
-
-           elif isinstance(error, litellm.AuthenticationError):
-               return AuthError(
-                   message=f"Authentication failed for {provider}: {str(error)}",
-                   provider=provider,
-                   original_error=error
-               )
-
-           elif isinstance(error, litellm.Timeout):
-               return TimeoutError(
-                   message=f"Request to {provider} timed out: {str(error)}",
-                   provider=provider,
-                   original_error=error
-               )
-
-           elif isinstance(error, litellm.BadRequestError):
-               return InvalidRequestError(
-                   message=f"Invalid request to {provider}: {str(error)}",
-                   provider=provider,
-                   original_error=error
-               )
-
-           elif isinstance(error, (litellm.ServiceUnavailableError, litellm.APIError)):
-               return ProviderUnavailableError(
-                   message=f"{provider} is unavailable: {str(error)}",
-                   provider=provider,
-                   original_error=error
-               )
-
-           else:
-               # Unknown error, wrap in base ProviderError
-               return ProviderError(
-                   message=f"Unexpected error from {provider}: {str(error)}",
-                   provider=provider,
-                   original_error=error
-               )
-
-       def _extract_provider(self, model: str) -> str:
-           """Extract provider name from model string"""
-           # gpt-4 → openai, claude-3 → anthropic, etc.
-           if model.startswith("gpt-"):
-               return "openai"
-           elif model.startswith("claude-"):
-               return "anthropic"
-           elif model.startswith("together/"):
-               return "together"
-           elif model.startswith("groq/"):
-               return "groq"
-           else:
-               return "unknown"
-
-       async def count_tokens(self, text: str, model: str) -> int:
-           """
-           Count tokens using LiteLLM's token counter.
-
-           Uses tiktoken for OpenAI models, approximation for others.
-           """
-           from litellm import token_counter
-
-           try:
-               return token_counter(model=model, text=text)
-           except Exception as e:
-               logger.warning("token_counting_failed",
-                            model=model,
-                            error=str(e))
-               # Fallback: rough approximation
-               return len(text.split()) * 1.3
-
-5. Update pyproject.toml dependencies:
-   Add to [project] dependencies: "litellm>=1.17.0"
+5. Add litellm>=1.17.0 to pyproject.toml dependencies
 
 REQUIREMENTS:
-- Use LiteLLM's acompletion (async) for all calls
-- Map ALL LiteLLM exceptions to our custom types
-- Add OpenTelemetry span for every LLM call with detailed attributes
-- Log request start, completion, and errors with structlog
-- Use tenacity for retry logic with exponential backoff
-- Retry on: RateLimitError, TimeoutError, ProviderUnavailableError (transient failures)
-- Don't retry on: AuthError, InvalidRequestError (permanent failures)
-- Include comprehensive docstrings with examples
-- Full type hints throughout
-- Handle both streaming and non-streaming responses
-- Proper error context (provider name, original error)
+- Production quality: full type hints, docstrings, error handling
+- Async/await throughout
+- Support streaming (AsyncIterator) and non-streaming
 
-Generate these files with production-quality code.
+Generate these files. After generation, I'll test with real API keys.
 ```
 
 **Your Tasks:**
@@ -638,6 +282,8 @@ Generate these files with production-quality code.
 ### Day 2: Testing & Validation
 
 **Morning: Manual Testing with Real APIs**
+
+**Note:** We're testing the LiteLLM wrapper directly (no HTTP routes yet - those come Day 4). This validates the provider layer works before integrating with FastAPI.
 
 **Create Test Script:**
 ```python
@@ -686,11 +332,13 @@ async def test_anthropic_non_streaming():
 
 async def test_error_handling():
     """Test error mapping with invalid API key"""
-    provider = LLMGatewayProvider()
+    # Save real key
+    real_key = os.environ.get("OPENAI_API_KEY")
 
     # Temporarily set bad API key
-    os.environ["OPENAI_API_KEY"] = "invalid-key"
+    os.environ["OPENAI_API_KEY"] = "sk-invalid-key-for-testing"
 
+    provider = LLMGatewayProvider()
     request = CompletionRequest(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Hello"}],
@@ -702,26 +350,66 @@ async def test_error_handling():
         async for chunk in provider.generate(request):
             print(chunk.content)
     except Exception as e:
-        print(f"Caught expected error: {type(e).__name__}: {e}")
+        print(f"✅ Caught expected error: {type(e).__name__}: {e}")
+
+    # Restore real key
+    if real_key:
+        os.environ["OPENAI_API_KEY"] = real_key
+    print()
+
+async def test_token_counting():
+    """Test token counting functionality"""
+    provider = LLMGatewayProvider()
+
+    text = "Hello world, this is a test message"
+    count = await provider.count_tokens(text, "gpt-4o-mini")
+
+    print(f"Token counting test:")
+    print(f"  Text: '{text}'")
+    print(f"  Token count: {count}")
     print()
 
 async def main():
+    print("=" * 60)
+    print("LiteLLM Wrapper Manual Testing")
+    print("=" * 60)
+    print()
+
     await test_openai_streaming()
     await test_anthropic_non_streaming()
+    await test_token_counting()
     await test_error_handling()
+
+    print("=" * 60)
+    print("Testing complete!")
+    print("=" * 60)
 
 if __name__ == "__main__":
     asyncio.run(main())
 ```
 
 **Your Testing Tasks:**
-- [ ] Create `.env` file with real API keys
+- [ ] Create `.env` file with real API keys (OPENAI_API_KEY, ANTHROPIC_API_KEY)
 - [ ] Run test script: `python scripts/test_litellm_wrapper.py`
 - [ ] Verify OpenAI streaming works (prints content incrementally)
 - [ ] Verify Anthropic non-streaming works (single response)
-- [ ] Test token counting: `await provider.count_tokens("Hello world", "gpt-4o")`
-- [ ] Verify Jaeger traces appear at http://localhost:16686
-- [ ] Check traces show nested spans (generate → api_call)
+- [ ] Verify token counting returns reasonable number
+- [ ] Verify error handling catches AuthError
+- [ ] Check Jaeger traces at http://localhost:16686
+- [ ] Verify traces show nested spans (generate → api_call)
+
+**What This Tests:**
+- ✅ LiteLLM wrapper works with real APIs
+- ✅ Streaming and non-streaming both work
+- ✅ Error mapping converts LiteLLM errors to our custom types
+- ✅ Token counting uses LiteLLM's token_counter
+- ✅ OpenTelemetry instrumentation creates traces
+
+**What This Does NOT Test:**
+- ❌ HTTP endpoints (not created until Day 4)
+- ❌ FastAPI integration (not created until Day 4)
+- ❌ Caching (not created until Week 2)
+- ❌ Rate limiting (not created until Week 2)
 
 **Afternoon: Unit Tests with Mocking**
 
@@ -731,103 +419,59 @@ Create comprehensive unit tests for the LiteLLM wrapper.
 
 CONTEXT:
 - LLMGatewayProvider wraps litellm.acompletion
-- Need to mock LiteLLM to test error handling without real API calls
-- Test both streaming and non-streaming responses
-- Test all error mappings
+- Need mocked tests (no real API calls during unit tests)
+- Test error mappings and retry logic
 
 CREATE:
 
-tests/providers/test_litellm_wrapper.py:
+tests/providers/test_litellm_wrapper.py
 
 Use pytest-asyncio and pytest-mock for mocking.
 
-Test Classes:
+TEST COVERAGE:
 
-1. TestCompletionRequest:
-   - test_valid_request: Valid request is accepted
-   - test_invalid_temperature: Temperature >2 raises ValueError
-   - test_empty_messages: Empty messages raises ValueError
-   - test_invalid_role: Invalid message role raises ValueError
+1. CompletionRequest Validation
+   - Valid request accepted
+   - Invalid temperature (>2) raises error
+   - Empty messages raises error
+   - Invalid message role raises error
 
-2. TestLLMGatewayProvider:
+2. LLMGatewayProvider - Success Cases
+   - Streaming response: mock litellm to return async generator with chunks
+   - Non-streaming response: mock litellm to return single response
+   - Verify CompletionChunk conversion
+   - Verify usage tokens extracted correctly
 
-   Fixtures:
-   - mock_litellm: Mock litellm.acompletion using mocker.patch
-   - provider: LLMGatewayProvider instance
+3. Error Mapping (mock litellm exceptions)
+   - litellm.RateLimitError → RateLimitError (verify retry_after extracted)
+   - litellm.AuthenticationError → AuthError (verify NO retries)
+   - litellm.Timeout → TimeoutError (verify retries attempted)
+   - litellm.BadRequestError → InvalidRequestError (verify NO retries)
+   - litellm.ServiceUnavailableError → ProviderUnavailableError (verify retries)
 
-   Tests:
-   - test_generate_streaming_success:
-     - Mock litellm to return async generator with 3 chunks
-     - Verify chunks are converted correctly
-     - Verify OpenTelemetry span is created
+4. Retry Logic
+   - Mock failure → failure → success (verify 3 attempts total)
+   - Verify exponential backoff delays
+   - Verify retries only on transient errors
 
-   - test_generate_non_streaming_success:
-     - Mock litellm to return single response
-     - Verify response conversion
-     - Verify usage tokens are extracted
+5. Token Counting
+   - Mock litellm.token_counter
+   - Verify correct count returned
+   - Test fallback when counting fails
 
-   - test_rate_limit_error_mapping:
-     - Mock litellm to raise litellm.RateLimitError
-     - Verify RateLimitError is raised with retry_after
-     - Verify retry logic attempts 3 times
+6. OpenTelemetry
+   - Verify spans created with correct attributes
+   - Mock tracer to capture span data
 
-   - test_auth_error_mapping:
-     - Mock litellm to raise litellm.AuthenticationError
-     - Verify AuthError is raised
-     - Verify NO retries (permanent failure)
-
-   - test_timeout_error_mapping:
-     - Mock litellm to raise litellm.Timeout
-     - Verify TimeoutError is raised
-     - Verify retry attempts
-
-   - test_invalid_request_error_mapping:
-     - Mock litellm to raise litellm.BadRequestError
-     - Verify InvalidRequestError is raised
-     - Verify NO retries
-
-   - test_provider_unavailable_error_mapping:
-     - Mock litellm to raise litellm.ServiceUnavailableError
-     - Verify ProviderUnavailableError is raised
-     - Verify retry attempts
-
-   - test_retry_success_after_failure:
-     - Mock litellm to fail twice (RateLimitError), succeed third time
-     - Verify successful response after retries
-     - Verify retry delays (exponential backoff)
-
-   - test_token_counting:
-     - Mock litellm.token_counter
-     - Verify correct token count returned
-     - Test fallback when token counting fails
-
-Mock Helper Classes:
-
-class MockLiteLLMChunk:
-    """Mock LiteLLM streaming chunk"""
-    def __init__(self, content: str, finish_reason: str | None = None):
-        self.choices = [MockChoice(content, finish_reason)]
-        self.model = "gpt-4o"
-        self.usage = None
-
-class MockChoice:
-    def __init__(self, content: str, finish_reason: str | None):
-        self.delta = MockDelta(content)
-        self.finish_reason = finish_reason
-
-class MockDelta:
-    def __init__(self, content: str):
-        self.content = content
+Include mock helper classes for LiteLLM response structure.
 
 REQUIREMENTS:
 - Use pytest.mark.asyncio for async tests
 - Use mocker.patch to mock litellm.acompletion
-- Test all error mappings thoroughly
-- Verify retry logic with multiple failure scenarios
-- Test OpenTelemetry span creation (mock tracer)
 - Aim for >90% coverage of litellm_wrapper.py
+- Include docstrings explaining test scenarios
 
-Generate this test file with comprehensive coverage.
+Generate this test file.
 ```
 
 **Your Tasks:**
@@ -954,80 +598,36 @@ CONTEXT:
 
 CREATE:
 
-1. docs/providers/README.md:
+1. docs/providers/README.md
+   - System overview (LiteLLM wrapper approach and rationale)
+   - Supported providers table (provider name, model examples, required API keys)
+   - Request flow diagram (ASCII art: Client → Gateway → LiteLLM → Provider)
+   - Error handling (document each custom error type)
+   - Observability (OpenTelemetry spans, structured logging)
+   - Usage examples (streaming, non-streaming, error handling, token counting)
 
-# Provider System Architecture
+2. docs/providers/design-decisions.md
+   - Decision: LiteLLM vs Custom Abstraction (date, status, rationale, consequences)
+   - Decision: Custom Error Types (why we built on top of LiteLLM)
+   - Decision: OpenTelemetry Integration (what we track and why)
 
-## Overview
-Explanation of LiteLLM wrapper approach and rationale.
+3. docs/providers/troubleshooting.md
+   - Common issues with solutions:
+     - "AuthError: Invalid API key"
+     - "RateLimitError: Rate limit exceeded"
+     - "TimeoutError: Request timed out"
+     - "Provider returns unexpected format"
 
-## Supported Providers
-Table of supported providers with:
-- Provider name
-- Model examples
-- Required API key environment variable
-- Capabilities (streaming, function calling, etc.)
-
-## Request Flow
-Diagram showing: Client → Gateway → LiteLLM Wrapper → Provider API
-
-## Error Handling
-Document custom error types and when each is raised.
-
-## Observability
-Explain OpenTelemetry spans and what they track.
-
-## Usage Examples
-Code examples for:
-- Streaming request
-- Non-streaming request
-- Error handling
-- Token counting
-
-2. docs/providers/design-decisions.md:
-
-# Provider System Design Decisions
-
-## Decision 1: LiteLLM vs Custom Abstraction
-- Date: [Today's date]
-- Status: Accepted
-- Context: Need to support multiple LLM providers
-- Decision: Use LiteLLM with custom wrapper
-- Consequences:
-  - PRO: 20+ providers instantly supported
-  - PRO: Community-maintained, handles API changes
-  - PRO: Focus engineering time on caching, rate limiting
-  - CON: Dependency on external library
-  - CON: Less control over provider internals
-
-## Decision 2: Custom Error Types
-- Why we built custom error hierarchy on top of LiteLLM
-- How errors map for retry logic
-
-## Decision 3: OpenTelemetry Integration
-- Why we instrument every LLM call
-- What attributes we track
-
-3. docs/providers/troubleshooting.md:
-
-Common issues and solutions:
-- "AuthError: Invalid API key"
-- "RateLimitError: Rate limit exceeded"
-- "TimeoutError: Request timed out"
-- "Provider returns unexpected format"
-
-4. Update README.md:
-
-Add section on multi-provider support:
-- Quick start with different providers
-- Environment variable setup
-- Available models
+4. Update README.md
+   - Add multi-provider support section
+   - Quick start with different providers
+   - Environment variable setup
+   - Available models list
 
 REQUIREMENTS:
-- Clear explanations with examples
-- Architecture diagrams (ASCII art is fine)
-- Troubleshooting section
-- Design rationale documented
+- Clear explanations with code examples
+- ASCII diagrams acceptable
+- Practical troubleshooting guidance
 
 Generate these documentation files.
 ```
@@ -1073,99 +673,51 @@ Client → FastAPI /v1/chat/completions → LLMGatewayProvider → LiteLLM → P
 Create the FastAPI gateway endpoint that integrates with LiteLLM wrapper.
 
 CONTEXT:
-- LLMGatewayProvider already handles provider selection (via LiteLLM)
-- Need FastAPI endpoint compatible with OpenAI API format
-- Support both streaming and non-streaming responses
-- Map errors to appropriate HTTP status codes
+- LLMGatewayProvider already handles provider selection automatically
+- Need OpenAI-compatible /v1/chat/completions endpoint
+- Support streaming (Server-Sent Events) and non-streaming
 
 CREATE:
 
-1. src/llmgateway/api/completions.py:
+1. src/llmgateway/api/completions.py
+   - APIRouter with prefix="/v1"
+   - POST /v1/chat/completions endpoint
+   - Request body: CompletionRequest from providers.models
+   - Response: StreamingResponse (SSE format) or JSONResponse
+   - SSE format: "data: {json}\n\n" for each chunk, "data: [DONE]\n\n" at end
+   - Response headers: X-Provider, X-Request-ID (UUID), X-Cache-Status (MISS for now)
+   - Error handling → HTTP status codes:
+     - RateLimitError → 429 (with Retry-After header)
+     - AuthError → 401
+     - TimeoutError → 504
+     - InvalidRequestError → 400
+     - ProviderUnavailableError → 502
+     - ValidationError → 422
+   - OpenTelemetry span: "gateway.completions" with attributes (model, stream, user_id, provider)
+   - Structured logging: request start/end with duration, tokens
 
-APIRouter with prefix="/v1"
+2. Update src/llmgateway/main.py
+   - Initialize LLMGatewayProvider in app.state at startup
+   - Create dependency: get_provider() returns provider from app.state
+   - Include completions router
+   - Add startup event: log "LLM Gateway ready"
 
-Dependencies:
-- get_provider: Returns LLMGatewayProvider instance (FastAPI dependency)
-
-POST /v1/chat/completions endpoint:
-
-Request body: Use CompletionRequest from providers.models
-Response: StreamingResponse for streaming, JSONResponse for non-streaming
-
-Functionality:
-- Validate request (Pydantic does this automatically)
-- Get provider instance from dependency
-- Call provider.generate(request)
-- If streaming:
-  - Use FastAPI StreamingResponse
-  - Format as Server-Sent Events (SSE)
-  - Each chunk: "data: {json}\n\n"
-  - Final: "data: [DONE]\n\n"
-- If non-streaming:
-  - Collect full response
-  - Return as JSON
-- Add response headers:
-  - X-Provider: extracted from model name
-  - X-Request-ID: correlation ID (generate UUID)
-  - X-Cache-Status: MISS (for now, will add caching Week 2)
-- Handle errors:
-  - RateLimitError → 429 with Retry-After header
-  - AuthError → 401 with error message
-  - TimeoutError → 504 Gateway Timeout
-  - InvalidRequestError → 400 Bad Request
-  - ProviderUnavailableError → 502 Bad Gateway
-  - Other ProviderError → 502
-  - ValidationError → 422 Unprocessable Entity
-- Add OpenTelemetry span:
-  - Span name: "gateway.completions"
-  - Attributes: model, stream, user_id, provider
-  - Record duration
-- Log request and response:
-  - Request start: model, stream, user_id
-  - Request end: status, duration, tokens
-  - Errors: error type, message
-
-Example SSE output format:
-```
-data: {"content":"Hello","finish_reason":null,"usage":null}
-
-data: {"content":" world","finish_reason":null,"usage":null}
-
-data: {"content":"","finish_reason":"stop","usage":{"input_tokens":10,"output_tokens":5}}
-
-data: [DONE]
-
-```
-
-2. Update src/llmgateway/main.py:
-
-- Initialize LLMGatewayProvider as application state
-- Add dependency function get_provider() that returns provider from app.state
-- Include completions router:
-  ```python
-  from src.llmgateway.api import completions
-  app.include_router(completions.router)
-  ```
-- Add startup event to log "LLM Gateway ready"
-
-3. Add to src/llmgateway/config.py:
-
-Settings for LiteLLM:
-- OPENAI_API_KEY (from environment)
-- ANTHROPIC_API_KEY (from environment)
-- TOGETHER_API_KEY (optional)
-- GROQ_API_KEY (optional)
-- LLM_TIMEOUT (default: 60 seconds)
-- LLM_MAX_RETRIES (default: 3)
+3. Update src/llmgateway/config.py
+   - Add environment variables:
+     - OPENAI_API_KEY
+     - ANTHROPIC_API_KEY
+     - TOGETHER_API_KEY (optional)
+     - GROQ_API_KEY (optional)
+     - LLM_TIMEOUT (default: 60)
+     - LLM_MAX_RETRIES (default: 3)
 
 REQUIREMENTS:
-- OpenAI API compatible endpoint format
+- OpenAI API compatible format
 - Proper SSE formatting for streaming
 - All errors mapped to HTTP status codes
 - Comprehensive logging with correlation IDs
 - OpenTelemetry instrumentation
-- Type hints and docstrings
-- Handle edge cases (empty responses, connection errors)
+- Full type hints and docstrings
 
 Generate these files and updates.
 ```
@@ -1249,78 +801,62 @@ Create integration tests for the complete gateway flow.
 
 CONTEXT:
 - Gateway uses LiteLLM wrapper for provider access
-- Need end-to-end tests from HTTP request to provider response
-- Use TestClient from FastAPI for integration tests
+- End-to-end tests from HTTP request to provider response
+- Use FastAPI TestClient for HTTP testing
 
 CREATE:
 
-tests/integration/test_gateway_integration.py:
+tests/integration/test_gateway_integration.py
 
 Mark all tests with @pytest.mark.integration (skip in CI by default)
 
-Fixtures:
+FIXTURES:
 - test_client: FastAPI TestClient
-- mock_env: Set up environment variables (API keys)
+- Set up environment variables with API keys
 
-Test Classes:
+TEST COVERAGE:
 
-1. TestGatewayEndToEnd:
-
-   tests/integration/test_gateway_e2e.py:
-
-   - test_openai_streaming_request:
-     - Send streaming request for gpt-4o-mini
+1. End-to-End Gateway Tests
+   - OpenAI streaming request:
      - Verify SSE format
      - Verify chunks received incrementally
      - Verify [DONE] message at end
      - Check response headers (X-Provider, X-Request-ID)
 
-   - test_anthropic_non_streaming_request:
-     - Send non-streaming request for claude-3-5-haiku
+   - Anthropic non-streaming request:
      - Verify JSON response format
      - Verify usage tokens present
      - Check response time < 5 seconds
 
-   - test_invalid_model_returns_400:
+   - Invalid model returns 400:
      - Send request with invalid model name
-     - Verify 400 status code
      - Verify error message in response
 
-   - test_missing_messages_returns_422:
+   - Missing messages returns 422:
      - Send request without messages field
-     - Verify 422 validation error
+     - Verify validation error
 
-   - test_invalid_temperature_returns_422:
-     - Send request with temperature = 5 (invalid)
-     - Verify 422 validation error
+   - Invalid temperature returns 422:
+     - Send request with temperature = 5
+     - Verify validation error
 
-2. TestProviderFallback (optional, for Week 4):
-
-   - test_primary_provider_down_fallback_works:
-     - Simulate primary provider unavailable
-     - Verify fallback to secondary provider
-     - Check logs show fallback attempt
-
-3. TestObservability:
-
-   - test_jaeger_trace_created:
+2. Observability Tests
+   - Jaeger trace created:
      - Make request
-     - Query Jaeger API for trace
+     - Query Jaeger API for trace (if accessible)
      - Verify spans present: gateway.completions, litellm.generate
 
-   - test_prometheus_metrics_incremented:
+   - Prometheus metrics incremented:
      - Get current metric count
      - Make request
      - Verify llm_requests_total incremented
-     - Verify llm_request_duration_seconds recorded
 
 REQUIREMENTS:
 - Use real API calls (mark with @pytest.mark.integration)
 - Test both OpenAI and Anthropic
 - Test streaming and non-streaming
-- Verify response format (SSE for streaming, JSON for non-streaming)
-- Check observability (traces, metrics)
-- Reasonable timeouts (don't hang indefinitely)
+- Verify response format (SSE vs JSON)
+- Reasonable timeouts (don't hang)
 
 Generate this test file.
 ```
@@ -1535,11 +1071,35 @@ Using LiteLLM saved ~1.5 weeks compared to building custom provider implementati
 ## Week 2: Caching & Rate Limiting
 
 ### Goals
-- ✅ Exact match caching (hash-based, Redis)
-- ✅ Semantic caching (embedding similarity, Redis)
-- ✅ Token bucket rate limiting (distributed, Redis Lua)
-- ✅ Cost tracking per request
-- ✅ Cache hit rate >30%
+- ✅ Exact match caching (hash-based, Redis) — **DONE**
+- ✅ Semantic caching (embedding similarity, Redis) — **DONE**
+- ✅ Token bucket rate limiting (distributed, Redis Lua) — **DONE**
+- ✅ Cost tracking per request — **DONE**
+- ⏳ Cache hit rate >30% — measured after load testing
+
+### Week 2 Actual Components Built
+
+```
+src/llmgateway/
+├── cache/
+│   ├── base.py           CacheEntry dataclass + CacheBackend Protocol
+│   ├── redis_cache.py    RedisCache (redis.asyncio, OTel spans, structlog)
+│   ├── cache_manager.py  CacheManager (exact-match + semantic, Prometheus metrics)
+│   └── embeddings.py     EmbeddingModel (sentence-transformers, cosine similarity)
+├── ratelimit/
+│   ├── limiter.py        RateLimiter (token bucket via Redis Lua)
+│   └── scripts/
+│       └── token_bucket.lua  Atomic Lua script
+├── cost/
+│   ├── pricing.py        PRICING_TABLE + calculate_cost()
+│   └── tracker.py        CostTracker (SQLAlchemy async → PostgreSQL)
+└── api/
+    ├── completions.py    Updated: cache check, rate limit, cost record, headers
+    └── admin.py          GET /admin/usage (cost summary endpoint)
+
+scripts/
+└── test_cache.py         Manual test script (component + HTTP tests)
+```
 
 ### Day 1: Cache Architecture Design
 
@@ -1586,7 +1146,7 @@ Alternative Considered: Qdrant/Pinecone for semantic
 - Selective: Option to bypass cache per request
 ```
 
-### Day 1 Afternoon: Exact Match Cache
+### Day 1 Afternoon: Exact Match Cache ✅ COMPLETE
 
 **Claude Code Prompt:**
 ```
@@ -1599,80 +1159,91 @@ CONTEXT:
 
 CREATE:
 
-1. src/llmgateway/cache/base.py:
+1. src/llmgateway/cache/base.py
+   - CacheEntry dataclass: key, value (JSON-serialized), created_at, ttl, metadata
+   - CacheBackend Protocol: async get(), set(), delete(), exists()
 
-Dataclass: CacheEntry
-- key: str
-- value: str (JSON-serialized CompletionChunk)
-- created_at: datetime
-- ttl: int (seconds)
-- metadata: dict (model, tokens, cost)
+2. src/llmgateway/cache/redis_cache.py
+   - RedisCache class implementing CacheBackend
+   - Use aioredis for async operations
+   - Serialize CacheEntry as JSON
+   - Add OpenTelemetry spans for cache operations
+   - Log cache hits/misses with structlog
 
-Protocol: CacheBackend
-- async def get(key: str) -> CacheEntry | None
-- async def set(key: str, value: CacheEntry, ttl: int) -> None
-- async def delete(key: str) -> None
-- async def exists(key: str) -> bool
+3. src/llmgateway/cache/cache_manager.py
+   - CacheManager class
+   - generate_cache_key(): SHA256 hash of (model + messages + temp + max_tokens)
+   - Only cache temperature=0 requests (return None for others)
+   - get_cached_response(): check cache, log hit/miss, update metrics
+   - cache_response(): store with TTL (default 1 hour)
 
-2. src/llmgateway/cache/redis_cache.py:
+4. Add Prometheus metrics
+   - llm_cache_hits_total
+   - llm_cache_misses_total
+   - llm_cache_lookup_duration_seconds
 
-Class: RedisCache(CacheBackend)
-- Constructor: redis_url from config
-- Use aioredis for async Redis client
-- Implement all methods from protocol
-- Serialize CacheEntry as JSON before storing
-- Add OpenTelemetry spans for cache operations
-- Log cache hits/misses
-
-3. src/llmgateway/cache/cache_manager.py:
-
-Class: CacheManager
-- Constructor: cache_backend, enable_semantic=False
-- Method: generate_cache_key(request: CompletionRequest) -> str
-  - Hash: SHA256(model + messages + temp + max_tokens)
-  - Only for temperature=0 (deterministic)
-  - Return None if not cacheable
-
-- Method: async get_cached_response(request) -> CompletionChunk | None
-  - Generate cache key
-  - Check exact match cache
-  - If hit: log, update metrics, return
-  - If miss: return None
-
-- Method: async cache_response(request, response) -> None
-  - Generate cache key
-  - Store with TTL (default 1 hour)
-  - Update metrics
-
-4. Add Prometheus metrics:
-- llm_cache_hits_total (counter)
-- llm_cache_misses_total (counter)
-- llm_cache_lookup_duration_seconds (histogram)
-
-5. Update src/llmgateway/api/completions.py:
-- Inject CacheManager as dependency
-- Before calling provider, check cache
-- After provider response, store in cache
-- Add X-Cache-Status header (HIT or MISS)
+5. Update src/llmgateway/api/completions.py
+   - Inject CacheManager dependency
+   - Check cache before calling provider
+   - Store response in cache after provider call
+   - Add X-Cache-Status header (HIT or MISS)
 
 REQUIREMENTS:
 - Only cache temperature=0 requests
 - TTL configurable via environment (default 3600s)
-- Atomic operations (get-or-set pattern)
-- Proper error handling (cache failures shouldn't break requests)
+- Cache failures shouldn't break requests (fail open)
 - Comprehensive logging
 
 Generate these files.
 ```
 
 **Your Tasks:**
-- [ ] Add redis[hiredis] to dependencies (should already be there)
-- [ ] Test cache hit/miss behavior
-- [ ] Verify X-Cache-Status header
-- [ ] Check Prometheus metrics: curl localhost:8000/metrics | grep cache
+- [x] Add redis[hiredis] to dependencies (already present in pyproject.toml)
+- [x] Test cache hit/miss behavior
+- [x] Verify X-Cache-Status header
+- [x] Check Prometheus metrics: curl localhost:8000/metrics | grep cache
 - [ ] Load test: send same request 100 times, verify 1 API call
 
-### Day 2: Semantic Caching
+#### What Was Actually Built — Day 1
+
+**`cache/base.py`**
+- `CacheEntry` dataclass: `key`, `value` (JSON string), `created_at` (Unix ts), `ttl`, `metadata`, `is_expired()` helper
+- `CacheBackend` Protocol (`@runtime_checkable`): `async get / set / delete / exists`
+
+**`cache/redis_cache.py`**
+- Uses `redis.asyncio` (bundled in `redis[hiredis]≥4.2`) — **not** a separate `aioredis` package
+- Every operation wrapped in an OTel span with `db.system=redis`, `cache.key`, `cache.hit` attributes
+- All exceptions caught → returns `None`/`False` (fail-open)
+- Keys namespaced as `llmgw:cache:<sha256>`
+
+**`cache/cache_manager.py`**
+- `generate_cache_key()` → `SHA256(json.dumps({model, messages, temperature, max_tokens}, sort_keys=True))`
+  - `sort_keys=True` ensures key is stable regardless of dict insertion order
+- `get_cached_response()` — skips immediately for `temperature != 0.0`
+- `cache_response()` — skips for `temperature != 0.0`, stores with configurable TTL
+- Three Prometheus metrics: `llm_cache_hits_total`, `llm_cache_misses_total`, `llm_cache_lookup_duration_seconds`
+
+**`config.py`** — added `cache_ttl: int = Field(default=3600)` (override with `CACHE_TTL` env var)
+
+**`main.py`** — startup initializes `aioredis.from_url()` → `RedisCache` → `CacheManager` on `app.state`; Redis failure is non-fatal (logs warning, sets `cache_manager=None`)
+
+**`api/completions.py`** — non-streaming path: `get_cached_response()` → return `HIT`; else call provider → `cache_response()` → return `MISS`. Streaming always `MISS`.
+
+**Design Decisions Made:**
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Only cache `temperature=0` | Hard gate, not configurable | Non-zero temp is stochastic; serving stale would be semantically wrong |
+| Fail-open on Redis error | Return `None` (treat as miss) | Cache is a performance optimisation, not required for correctness |
+| `redis.asyncio` not `aioredis` | Use bundled module | `aioredis` was merged into `redis-py≥4.2`; no extra dep needed |
+| SHA-256 over all params | Whole request fingerprint | Ensures model, messages, temp, max_tokens all affect the key |
+| `sort_keys=True` | Canonical JSON | Prevents dict-ordering differences generating different keys |
+
+**`scripts/test_cache.py`** created — exercises component tests (no server needed) AND HTTP tests (gateway needed), with graceful skip when either is unavailable.
+
+**Ruff pre-commit hook fix:**
+`scripts/test_all_providers.py` was missing `# noqa: E402` on one import, and `tests/api/test_completions.py` had an invalid noqa label (`unreachable` instead of a code). Both fixed before commit.
+
+### Day 2: Semantic Caching ✅ COMPLETE
 
 **Claude Code Prompt:**
 ```
@@ -1686,71 +1257,99 @@ CONTEXT:
 
 CREATE:
 
-1. src/llmgateway/cache/embeddings.py:
+1. src/llmgateway/cache/embeddings.py
+   - EmbeddingModel class
+   - Use sentence-transformers model: "all-MiniLM-L6-v2" (fast, 384 dimensions)
+   - encode(text) → numpy array (cache model instance, don't reload)
+   - Add OpenTelemetry span for encoding time
+   - cosine_similarity(vec1, vec2) → float (0-1)
 
-Class: EmbeddingModel
-- Use sentence-transformers library
-- Model: "all-MiniLM-L6-v2" (fast, 384 dimensions)
-- Method: encode(text: str) -> np.ndarray
-  - Cache model instance (don't reload each time)
-  - Return embedding vector
-  - Add OpenTelemetry span for encoding time
+2. Update src/llmgateway/cache/cache_manager.py
+   - Add semantic cache methods:
+   - get_semantic_match(): extract user message, generate embedding, search Redis for similar embeddings, calculate cosine similarity, return if >threshold (0.95)
+   - cache_with_embedding(): store response + embedding in Redis
+   - Log similarity scores
 
-Function: cosine_similarity(vec1, vec2) -> float
-- Calculate similarity between embeddings
-- Return score 0-1
+3. Update src/llmgateway/api/completions.py
+   - Check exact match first (fast path)
+   - If miss and semantic enabled, check semantic match
+   - Add X-Cache-Type header (EXACT, SEMANTIC, or MISS)
 
-2. Update src/llmgateway/cache/cache_manager.py:
+4. Configuration
+   - ENABLE_SEMANTIC_CACHE (default: true)
+   - SEMANTIC_CACHE_THRESHOLD (default: 0.95)
+   - SEMANTIC_CACHE_MAX_ENTRIES (default: 1000)
 
-Add semantic cache methods:
-- Method: async get_semantic_match(request) -> CacheEntry | None
-  - Extract user message from request
-  - Generate embedding
-  - Search Redis for similar embeddings (get all cached keys)
-  - Calculate cosine similarity for each
-  - If any score > threshold (0.95), return cached response
-  - Log similarity score
-
-- Method: async cache_with_embedding(request, response) -> None
-  - Store response with exact key
-  - Also store embedding in separate Redis key
-  - Format: "embedding:{hash}" → base64 encoded numpy array
-
-- Update generate_cache_key to support semantic lookups
-
-3. Update src/llmgateway/api/completions.py:
-- Check exact match first (fast path)
-- If miss and semantic enabled, check semantic match
-- Log which cache layer hit (exact vs semantic)
-- Add X-Cache-Type header (EXACT, SEMANTIC, or MISS)
-
-4. Add configuration:
-- ENABLE_SEMANTIC_CACHE (default: true)
-- SEMANTIC_CACHE_THRESHOLD (default: 0.95)
-- SEMANTIC_CACHE_MAX_ENTRIES (default: 1000)
-
-5. Add metrics:
-- llm_semantic_cache_hits_total
-- llm_semantic_cache_lookups_duration_seconds
-- llm_embedding_generation_duration_seconds
+5. Metrics
+   - llm_semantic_cache_hits_total
+   - llm_semantic_cache_lookups_duration_seconds
+   - llm_embedding_generation_duration_seconds
 
 REQUIREMENTS:
-- Semantic cache is opt-in (can disable for performance)
-- Handle large cache: limit to most recent N entries
-- Embedding generation should be <50ms p99
-- Fall back gracefully if embedding fails
+- Semantic cache opt-in (can disable)
+- Limit to most recent N entries
+- Embedding generation <50ms p99
+- Graceful fallback if embedding fails
 
 Generate these files and updates.
 ```
 
 **Your Tasks:**
-- [ ] Add sentence-transformers to dependencies
+- [x] Add sentence-transformers to dependencies
 - [ ] Test with similar queries: "hello" vs "hi there"
 - [ ] Verify semantic matches when similarity >0.95
 - [ ] Measure embedding latency (should be <50ms)
-- [ ] Test with semantic cache disabled (should still work)
+- [x] Test with semantic cache disabled (should still work — `ENABLE_SEMANTIC_CACHE=false`)
 
-### Day 3: Rate Limiting
+#### What Was Actually Built — Day 2
+
+**`cache/embeddings.py`**
+- `EmbeddingModel` wraps `sentence-transformers` (`all-MiniLM-L6-v2`, 384 dims)
+- `encode(text)` runs in a thread pool (`asyncio.get_event_loop().run_in_executor`) to avoid blocking the event loop; OTel span wraps the call
+- `cosine_similarity(vec1, vec2)` — pure numpy dot product on L2-normalised vectors
+
+**`cache/cache_manager.py`** extended with semantic methods:
+- `get_semantic_match(request)` — extracts last user message → generates embedding → `ZRANGE llmgw:sem:idx:{model}` → `MGET` all embeddings in one round-trip → cosine similarity scan → fetch response if best score ≥ `semantic_threshold`
+- `cache_with_embedding(request, response_data)` — generate embedding → `SET llmgw:sem:emb:{uuid}` + `SET llmgw:sem:resp:{uuid}` with TTL → `ZADD llmgw:sem:idx:{model}` (score = Unix timestamp) → evict oldest with `ZPOPMIN` if index exceeds `semantic_max_entries`
+
+**Redis key layout for semantic index:**
+```
+llmgw:sem:emb:{uuid}   JSON float list (embedding vector), TTL-expiring
+llmgw:sem:resp:{uuid}  JSON response dict, TTL-expiring
+llmgw:sem:idx:{model}  Sorted set of UUIDs, scored by creation time (FIFO eviction)
+```
+
+**New Prometheus metrics:** `llm_semantic_cache_hits_total`, `llm_semantic_cache_lookups_duration_seconds`
+
+**`completions.py`** request flow (non-streaming):
+```
+1. get_cached_response()    → exact-match check (SHA-256 lookup)
+   ├─ HIT  → return (X-Cache-Status: HIT, X-Cache-Type: EXACT)
+   └─ MISS ↓
+2. get_semantic_match()     → embedding + cosine scan
+   ├─ HIT  → return (X-Cache-Status: HIT, X-Cache-Type: SEMANTIC)
+   └─ MISS ↓
+3. provider.generate()      → LLM API call
+4. cache_response()         → store exact-match entry
+5. cache_with_embedding()   → store semantic entry
+6. return (X-Cache-Status: MISS)
+```
+
+**`config.py`** additions:
+- `enable_semantic_cache: bool = Field(default=True)` → `ENABLE_SEMANTIC_CACHE`
+- `semantic_cache_threshold: float = Field(default=0.95)` → `SEMANTIC_CACHE_THRESHOLD`
+- `semantic_cache_max_entries: int = Field(default=1000)` → `SEMANTIC_CACHE_MAX_ENTRIES`
+
+**Design Decisions Made:**
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Embed only the last user message | Single string | System prompts and history are handled by exact-match; semantic targets user intent |
+| MGET batch for similarity scan | One Redis round-trip | Avoids N round-trips for N stored embeddings; critical for latency |
+| Redis ZSET for index (not a list) | Sorted set by timestamp | Enables FIFO eviction with `ZPOPMIN` in O(log N); no separate expiry tracking needed |
+| Thread pool for embedding | `run_in_executor` | `sentence-transformers` is CPU-bound; blocking the event loop would stall all concurrent requests |
+| Threshold default 0.95 | High confidence | At 0.95 cosine similarity the queries are nearly identical; lower values risk semantically-different questions getting the same answer |
+
+### Day 3: Rate Limiting ✅ COMPLETE
 
 **Claude Code Prompt:**
 ```
@@ -1758,41 +1357,27 @@ Implement token bucket rate limiting using Redis.
 
 CONTEXT:
 - Prevent abuse and manage costs
-- Use token bucket algorithm (allows bursts)
+- Token bucket algorithm (allows bursts)
 - Distributed via Redis Lua scripts
 - Per-user rate limits
 
 CREATE:
 
-1. src/llmgateway/ratelimit/token_bucket.py:
+1. src/llmgateway/ratelimit/token_bucket.py
+   - TokenBucket class
+   - async consume(user_id, tokens) → (allowed: bool, retry_after: float)
+   - Use Redis Lua script for atomic operations (provided below)
+   - Add OpenTelemetry span
 
-Class: TokenBucket
-- Constructor: redis_client, rate (tokens/sec), capacity (max tokens)
-- Method: async consume(user_id: str, tokens: int) -> tuple[bool, float]
-  - Use Redis Lua script for atomicity:
-    - Get current tokens and last_refill time
-    - Calculate tokens to add: (now - last_refill) * rate
-    - New tokens = min(current + added, capacity)
-    - If new_tokens >= requested: allow, subtract tokens
-    - Else: deny, calculate retry_after
-  - Return (allowed: bool, retry_after: float)
-  - Add OpenTelemetry span
+2. src/llmgateway/ratelimit/limiter.py
+   - RateLimiter class
+   - RateLimitResult dataclass: allowed, retry_after, remaining, reset_time
+   - check_rate_limit(user_id, cost) → RateLimitResult
+   - get_rate_limit_info(user_id) → dict (for debugging/admin)
 
-2. src/llmgateway/ratelimit/limiter.py:
+3. src/llmgateway/ratelimit/scripts/token_bucket.lua
+   Use this Lua script for atomic token bucket operations:
 
-Class: RateLimiter
-- Constructor: redis_url, default limits
-- Method: async check_rate_limit(user_id: str, cost: int) -> RateLimitResult
-  - RateLimitResult dataclass: allowed, retry_after, remaining, reset_time
-  - Check token bucket
-  - Log if rate limit exceeded
-  - Return result
-
-- Method: async get_rate_limit_info(user_id: str) -> dict
-  - Return current token count, capacity, refill rate
-  - For debugging/admin purposes
-
-3. Create Lua script in src/llmgateway/ratelimit/scripts/token_bucket.lua:
 ```lua
 -- Token bucket implementation
 local key = KEYS[1]
@@ -1824,24 +1409,20 @@ else
 end
 ```
 
-4. Update src/llmgateway/api/completions.py:
-- Add rate limiting middleware
-- Extract user_id from request (header or API key)
-- Check rate limit before processing request
-- If exceeded:
-  - Return 429 Too Many Requests
-  - Add Retry-After header
-  - Add X-RateLimit-* headers (Limit, Remaining, Reset)
-- Add rate limit info to all responses (headers)
+4. Update src/llmgateway/api/completions.py
+   - Extract user_id from request header or API key
+   - Check rate limit before processing
+   - If exceeded: return 429 with Retry-After and X-RateLimit-* headers
+   - Add rate limit info to all response headers
 
-5. Add configuration:
-- RATE_LIMIT_ENABLED (default: true)
-- RATE_LIMIT_DEFAULT_RATE (default: 10/minute)
-- RATE_LIMIT_DEFAULT_CAPACITY (default: 20)
+5. Configuration
+   - RATE_LIMIT_ENABLED (default: true)
+   - RATE_LIMIT_DEFAULT_RATE (default: 10/minute)
+   - RATE_LIMIT_DEFAULT_CAPACITY (default: 20)
 
-6. Add metrics:
-- llm_rate_limit_exceeded_total{user_id}
-- llm_rate_limit_checks_total
+6. Metrics
+   - llm_rate_limit_exceeded_total{user_id}
+   - llm_rate_limit_checks_total
 
 REQUIREMENTS:
 - Atomic operations via Lua script
@@ -1859,7 +1440,42 @@ Generate these files.
 - [ ] Test with multiple "users" (don't interfere with each other)
 - [ ] Load test: `ab -n 200 -c 10 http://localhost:8000/v1/chat/completions`
 
-### Day 4: Cost Tracking
+#### What Was Actually Built — Day 3
+
+**`ratelimit/limiter.py`** — `RateLimiter` class:
+- Constructor: `redis_client`, `default_capacity` (bucket size), `default_rate` (tokens/sec), `enabled` flag
+- `check(user_id)` → runs the Lua script via `redis.evalsha()`, returns `(allowed: bool, retry_after: float, remaining: float)`
+- Redis key: `llmgw:rl:{user_id}`, hash with `tokens` and `last_refill` fields; 1-hour TTL via `EXPIRE`
+- Fails open: Redis error → allow request, log warning
+
+**`ratelimit/scripts/token_bucket.lua`** — atomic Lua script:
+- Calculates tokens refilled since `last_refill` using `elapsed * rate`
+- Caps at `capacity` (prevents "saving up" tokens indefinitely)
+- Returns `{1, remaining, 0}` (allowed) or `{0, remaining, retry_after}` (denied)
+- All operations in one Lua execution → atomically safe, no race conditions
+
+**`completions.py`** rate-limit integration:
+- `user_id` extracted from `body.user` (falls back to `"anonymous"`)
+- Check runs before cache lookup — rate-limited requests never hit the LLM or cache
+- 429 response includes `Retry-After` (seconds) and `X-RateLimit-Remaining` headers
+
+**`config.py`** additions:
+- `rate_limit_enabled: bool = Field(default=True)` → `RATE_LIMIT_ENABLED`
+- `rate_limit_default_capacity: int = Field(default=20)` → `RATE_LIMIT_DEFAULT_CAPACITY`
+- `rate_limit_default_rate: float = Field(default=10.0)` → `RATE_LIMIT_DEFAULT_RATE` (requests/minute, converted to/sec internally)
+
+**`main.py`** — `RateLimiter` shares the same `redis_client` instance as `CacheManager` (no extra connection pool needed)
+
+**Design Decisions Made:**
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Token bucket over sliding window | Token bucket | Allows short bursts (natural user behaviour) while enforcing sustained rate; simpler Lua script |
+| Lua script for atomicity | Single `EVAL` call | No WATCH/MULTI/EXEC dance; Lua runs as a single Redis command — inherently atomic |
+| Fail-open on Redis error | Allow request | Rate limiting is a protection, not a hard requirement; outage should not become a user-visible failure |
+| Shared Redis client | One connection pool | Rate limiter + cache already run on the same Redis instance; sharing avoids doubling connections |
+| `user_id` from request body | `body.user` field | OpenAI-compatible field; falls back to `"anonymous"` — no auth header required for now |
+
+### Day 4: Cost Tracking ✅ COMPLETE
 
 **Claude Code Prompt:**
 ```
@@ -1872,77 +1488,47 @@ CONTEXT:
 
 CREATE:
 
-1. src/llmgateway/cost/pricing.py:
+1. src/llmgateway/cost/pricing.py
+   - PRICING_TABLE dict with per-1K-token rates:
+     - gpt-4o: input $0.0025, output $0.01
+     - gpt-4o-mini: input $0.00015, output $0.0006
+     - claude-3-5-sonnet: input $0.003, output $0.015
+     - claude-3-5-haiku: input $0.0008, output $0.004
+   - calculate_cost(model, input_tokens, output_tokens) → float (USD)
 
-PRICING_TABLE = {
-    "gpt-4o": {"input": 0.0025, "output": 0.01},  # per 1K tokens
-    "gpt-4o-mini": {"input": 0.00015, "output": 0.0006},
-    "claude-3-5-sonnet-20241022": {"input": 0.003, "output": 0.015},
-    "claude-3-5-haiku-20241022": {"input": 0.0008, "output": 0.004},
-}
+2. src/llmgateway/cost/tracker.py
+   - CostTracker class with async SQLAlchemy session
+   - record_usage(user_id, model, tokens, cost, cached)
+   - get_user_cost(user_id, start_date, end_date) → dict (breakdown by model)
+   - get_daily_cost() → float (for monitoring/alerts)
+   - Add OpenTelemetry spans
 
-Function: calculate_cost(model: str, input_tokens: int, output_tokens: int) -> float
-- Lookup pricing for model
-- Calculate: (input_tokens/1000 * input_price) + (output_tokens/1000 * output_price)
-- Return cost in USD
+3. Database migration
+   Create usage_records table with columns:
+   - id, timestamp (indexed), user_id (indexed), model
+   - input_tokens, output_tokens, cost_usd
+   - cached (boolean), cache_type (EXACT/SEMANTIC/null)
+   - Composite index: (user_id, timestamp)
 
-2. src/llmgateway/cost/tracker.py:
+4. Update src/llmgateway/api/completions.py
+   - Calculate cost after response
+   - Record usage in database (async, don't block response)
+   - Add X-Cost header with USD amount
+   - Update Prometheus gauge: llm_cost_usd_total
 
-Class: CostTracker
-- Constructor: db_session (SQLAlchemy async session)
-- Method: async record_usage(user_id, model, input_tokens, output_tokens, cost, cached)
-  - Insert into usage_records table
-  - Fields: timestamp, user_id, model, input_tokens, output_tokens, cost, cached
-  - Add OpenTelemetry span
+5. Admin endpoint
+   - GET /admin/costs/summary with params: user_id, start_date, end_date
+   - Return: total_cost, cost_by_model, request_count
+   - Simple admin authentication
 
-- Method: async get_user_cost(user_id, start_date, end_date) -> dict
-  - Query total cost for user in date range
-  - Group by model
-  - Return breakdown
-
-- Method: async get_daily_cost() -> float
-  - Query total cost for today
-  - For monitoring/alerts
-
-3. Database migration:
-```python
-# migrations/versions/001_add_usage_tracking.py
-def upgrade():
-    op.create_table(
-        'usage_records',
-        sa.Column('id', sa.Integer, primary_key=True),
-        sa.Column('timestamp', sa.DateTime, nullable=False, index=True),
-        sa.Column('user_id', sa.String(255), nullable=False, index=True),
-        sa.Column('model', sa.String(100), nullable=False),
-        sa.Column('input_tokens', sa.Integer, nullable=False),
-        sa.Column('output_tokens', sa.Integer, nullable=False),
-        sa.Column('cost_usd', sa.Numeric(10, 6), nullable=False),
-        sa.Column('cached', sa.Boolean, default=False),
-        sa.Column('cache_type', sa.String(20)),  # EXACT, SEMANTIC, null
-    )
-    op.create_index('ix_usage_records_user_timestamp', 'usage_records', ['user_id', 'timestamp'])
-```
-
-4. Update src/llmgateway/api/completions.py:
-- After response, calculate cost
-- Record usage in database
-- Add X-Cost header with USD amount
-- Update Prometheus gauge: llm_cost_usd_total
-
-5. Create admin endpoint:
-GET /admin/costs/summary:
-- Query parameters: user_id, start_date, end_date
-- Return: total_cost, cost_by_model, request_count
-- Require admin authentication (simple for now)
-
-6. Add budget alerts:
-- Check daily cost after each request
-- If > threshold (env: DAILY_COST_ALERT_THRESHOLD), log warning
-- Future: webhook to Slack/email
+6. Budget alerts
+   - Check daily cost after each request
+   - Log warning if > DAILY_COST_ALERT_THRESHOLD
+   - Future: webhook to Slack/email
 
 REQUIREMENTS:
 - Accurate cost calculation using current pricing
-- Handle cached requests (cost = 0 for exact match)
+- Cached requests: cost = 0 for exact match
 - Async database writes (don't block response)
 - Cost metrics in Prometheus
 
@@ -1955,6 +1541,44 @@ Generate these files.
 - [ ] Verify X-Cost header on responses
 - [ ] Query database: `SELECT SUM(cost_usd) FROM usage_records WHERE timestamp > NOW() - INTERVAL '1 day'`
 - [ ] Check Grafana: cost per hour, cost by model
+
+#### What Was Actually Built — Day 4
+
+**`cost/pricing.py`** — `PRICING_TABLE`:
+- Exact model → `(input_$/1k, output_$/1k)` for OpenAI, Anthropic, Google, Together, Groq, Mistral
+- Prefix fallback (`_PREFIX_FALLBACKS` list, most-specific first) for versioned model strings not in the table
+- Conservative unknown default: `$0.002/1k` for both input and output
+- `calculate_cost(model, input_tokens, output_tokens) → float` rounded to 8 decimal places
+
+**`cost/tracker.py`** — `CostTracker` (SQLAlchemy async):
+- ORM model `UsageRecord` → `usage_records` table with columns: `id`, `timestamp` (indexed), `user_id` (indexed), `model`, `input_tokens`, `output_tokens`, `cost_usd`, `cached` (bool), `cache_type` (`"EXACT"` / `"SEMANTIC"` / `None`)
+- `record_usage()` — INSERT with `AsyncSession`; exceptions caught and logged (never propagated)
+- `get_summary(user_id, start, end)` — `GROUP BY model` aggregate with optional date filter
+- `get_daily_cost()` — `SUM(cost_usd)` for today UTC (used for budget alert)
+- `close()` — `await engine.dispose()` called in shutdown event
+
+**`completions.py`** cost integration:
+- `_schedule_cost_record()` wraps DB write in `asyncio.create_task()` — **fire-and-forget**, response is never delayed
+- `_record_cost_async()` calls `record_usage()` then checks `get_daily_cost()` vs `settings.daily_cost_alert_threshold` — logs WARNING if exceeded
+- `X-Cost` header added with 8-decimal USD amount
+- Prometheus counter `llm_cost_total{model, user_id}` incremented synchronously
+
+**`api/admin.py`** — `GET /admin/usage`:
+- Query params: `user_id` (optional), `start` / `end` (ISO datetime, optional)
+- Returns `{total_cost_usd, request_count, cost_by_model}`
+- Uses `_get_cost_tracker()` dependency; returns 503 if tracker not initialised
+
+**`config.py`** addition:
+- `daily_cost_alert_threshold: float = Field(default=50.0)` → `DAILY_COST_ALERT_THRESHOLD` (USD)
+
+**Design Decisions Made:**
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Fire-and-forget DB write | `asyncio.create_task()` | Cost recording must never add latency to the user response; Postgres is slower than Redis |
+| Cost = $0.00 for cache hits | `cost_usd=0.0`, `cached=True` | Cached responses consumed no tokens; still log the row so cache savings are measurable |
+| Prefix-based fallback pricing | `_PREFIX_FALLBACKS` list | Model version strings (`claude-sonnet-4-6`, `gpt-4o-2024-05`) change frequently; prefix match keeps coverage without constant table updates |
+| Daily alert in same task | After `record_usage()` | No need for a separate cron job; every non-cached request checks the daily total naturally |
+| Admin endpoint (no auth yet) | Simple GET with query params | Intentionally deferred auth to keep scope focused; noted as a Phase 2 security task |
 
 ### Day 5: Testing & Week 2 Review
 
@@ -1991,22 +1615,39 @@ curl localhost:8000/metrics | grep -E "llm_(cache|rate_limit|cost)"
 ### Week 2 Deliverables
 
 **Features:**
-- ✅ Exact match caching (5ms latency, 100% cost savings)
-- ✅ Semantic caching (50ms latency, 80% cost savings)
-- ✅ Token bucket rate limiting (distributed, per-user)
-- ✅ Real-time cost tracking with PostgreSQL storage
-- ✅ Admin API for cost reporting
+- ✅ Exact match caching (`SHA-256` key, `temperature=0` gate, Redis TTL, OTel spans)
+- ✅ Semantic caching (`all-MiniLM-L6-v2` embeddings, cosine similarity, Redis ZSET index, FIFO eviction)
+- ✅ Token bucket rate limiting (Lua script, per-user, `X-RateLimit-*` headers)
+- ✅ Real-time cost tracking (static pricing table, async PostgreSQL, fire-and-forget writes)
+- ✅ Admin API (`GET /admin/usage` — cost summary by model, user, date range)
+- ✅ Manual test script (`scripts/test_cache.py` — component + HTTP, skip-aware)
+- ✅ `X-Cache-Status` header (`HIT` / `MISS`) and `X-Cache-Type` (`EXACT` / `SEMANTIC` / absent)
+- ✅ `X-Cost` header (8-decimal USD per response)
+
+**All components fail-open:** Redis unavailable → cache miss, rate limit pass-through; Postgres unavailable → no cost record logged; none of these failures surface as HTTP errors.
+
+**Response headers added (Week 2):**
+```
+X-Cache-Status: HIT | MISS
+X-Cache-Type:   EXACT | SEMANTIC      (present only on HIT)
+X-Cost:         0.00003750            (USD, 8 decimal places)
+X-RateLimit-Remaining: 17.3           (tokens left in bucket)
+Retry-After:    4                     (seconds; present only on 429)
+```
 
 **Metrics:**
-- ✅ Cache hit rate: 30-40% (varies by traffic)
-- ✅ Rate limiting: <10% requests blocked (tunable)
-- ✅ Cost tracking: 100% accuracy vs provider bills
+- ⏳ Cache hit rate: to be measured after load testing
+- ✅ Rate limiting: working, tunable via `RATE_LIMIT_DEFAULT_CAPACITY` / `RATE_LIMIT_DEFAULT_RATE`
+- ✅ Cost tracking: per-request USD, daily total, model breakdown
 
-**Interview Talking Points:**
-- "Implemented two-layer caching achieving 40% cost savings"
-- "Token bucket rate limiting using Redis Lua scripts for atomicity"
-- "Real-time cost tracking with PostgreSQL for analytics"
-- "Trade-off analysis: semantic cache adds 50ms but catches 15% more queries"
+**Interview Talking Points (Week 2):**
+> "I built a two-layer cache: exact-match via SHA-256 in Redis handles identical requests in ~5ms, and a semantic layer using `all-MiniLM-L6-v2` embeddings catches similar queries with cosine similarity above 0.95. The semantic index uses a Redis sorted-set for O(log N) FIFO eviction and a single MGET round-trip to fetch all stored vectors — avoiding N serial lookups."
+
+> "Rate limiting is a token bucket algorithm implemented in a Redis Lua script. The entire check-and-update runs atomically in one EVAL call, so there's no TOCTOU race between reading the bucket state and writing it back. The rate limiter shares the same Redis client as the cache — no extra connection pool."
+
+> "Cost records are written to PostgreSQL via SQLAlchemy async, but the write is wrapped in `asyncio.create_task()` — fire-and-forget. The HTTP response never waits for the database. If Postgres is down the request still succeeds; a warning is logged. Cached responses record `cost_usd=0.0` so you can measure cache savings in the analytics query."
+
+> "Every component is fail-open by design. Cache failures are cache misses. Rate-limiter failures are rate-limit passes. Cost-tracker failures are silent warnings. The gateway degrades gracefully rather than cascading."
 
 ---
 
@@ -2033,80 +1674,46 @@ CONTEXT:
 
 CREATE:
 
-1. src/llmgateway/observability/metrics.py:
+1. src/llmgateway/observability/metrics.py
+   - Define all Prometheus metrics:
+     - Counters: llm_requests_total, llm_cache_hits_total, llm_cost_usd_total, llm_rate_limit_exceeded_total
+     - Histograms: llm_request_duration_seconds, llm_token_count, llm_provider_api_duration_seconds, llm_cache_lookup_duration_seconds
+     - Gauges: llm_cache_hit_rate, llm_active_requests
+   - MetricsCollector class (singleton pattern)
+   - Methods to record each metric with automatic label extraction
+   - Thread-safe operations
 
-Define all Prometheus metrics:
-- Counter: llm_requests_total{model, status, cache_status, provider}
-- Histogram: llm_request_duration_seconds{model, provider}
-- Histogram: llm_token_count{model, type=input|output}
-- Counter: llm_cost_usd_total{model, user_id}
-- Gauge: llm_cache_hit_rate (calculated from hits/total)
-- Counter: llm_cache_hits_total{cache_type=exact|semantic}
-- Counter: llm_rate_limit_exceeded_total{user_id}
-- Histogram: llm_provider_api_duration_seconds{provider}
-- Histogram: llm_cache_lookup_duration_seconds{cache_type}
-- Gauge: llm_active_requests (in-flight requests)
+2. Update all components to use MetricsCollector
+   - completions.py, cache_manager.py, rate_limiter.py, providers
 
-Class: MetricsCollector
-- Singleton pattern
-- Methods to record each metric
-- Automatic label extraction from request context
-- Thread-safe increment/observe methods
+3. Grafana dashboard JSON (.devcontainer/grafana/dashboards/llm-gateway.json)
+   - 6 rows covering:
+     - Request rate (by model, by status code)
+     - Latency (P50/P95/P99, by model, provider vs total)
+     - Cache performance (hit rate, lookups/sec, duration)
+     - Cost tracking (per hour, per 1K requests, daily total)
+     - Rate limiting (exceeded/min, top users)
+     - Errors (error rate %, by type)
 
-2. Update all components to use MetricsCollector:
-- completions.py: record request metrics
-- cache_manager.py: record cache metrics
-- rate_limiter.py: record rate limit metrics
-- providers: record API call duration
+4. Update Prometheus config (.devcontainer/prometheus.yml)
+   - Add recording rules for common queries
+   - Add alerting rules: error rate >5%, p99 latency >2s, daily cost >$50
 
-3. Create Grafana dashboard JSON:
-
-.devcontainer/grafana/dashboards/llm-gateway.json:
-- Row 1: Request Rate
-  - Panel: Requests per second (by model)
-  - Panel: Requests per second (by status code)
-- Row 2: Latency
-  - Panel: P50, P95, P99 latency (overall)
-  - Panel: P99 latency by model
-  - Panel: Provider API latency vs total latency
-- Row 3: Cache Performance
-  - Panel: Cache hit rate (gauge)
-  - Panel: Cache lookups per second (by type)
-  - Panel: Cache lookup duration
-- Row 4: Cost Tracking
-  - Panel: Cost per hour (by model)
-  - Panel: Cost per 1K requests
-  - Panel: Total daily cost
-- Row 5: Rate Limiting
-  - Panel: Rate limit exceeded per minute
-  - Panel: Top users by request count
-- Row 6: Errors
-  - Panel: Error rate percentage
-  - Panel: Errors by type (RateLimitError, TimeoutError, etc.)
-
-4. Update .devcontainer/prometheus.yml:
-- Add recording rules for common queries
-- Add alerting rules (optional, for learning)
-
-5. Create src/llmgateway/observability/tracing.py:
-
-Add custom spans to key operations:
-- Span: llm_gateway.request (root span)
-  - Attributes: model, user_id, cached
-  - Child span: cache.lookup
-  - Child span: rate_limit.check
-  - Child span: provider.generate
-    - Child span: provider.api_call
-  - Child span: cost.calculate
-  - Child span: cost.record
-
-Update all components to add spans with rich attributes.
+5. src/llmgateway/observability/tracing.py
+   - Add custom spans with hierarchy:
+     - llm_gateway.request (root)
+       - cache.lookup
+       - rate_limit.check
+       - provider.generate
+         - provider.api_call
+       - cost.calculate
+       - cost.record
+   - Rich attributes on each span
 
 REQUIREMENTS:
 - All metrics have help text
-- Dashboard is visually clear
-- Alerts for: error rate >5%, p99 latency >2s, daily cost >$50
-- Tracing shows complete request flow
+- Dashboard visually clear
+- Tracing shows complete request flow with timing
 
 Generate these files and updates.
 ```
@@ -2755,18 +2362,22 @@ pytest tests/test_file.py::test_name -s  # Debug specific test
 # Verify services are running
 ```
 
+**"Do I need to rebuild the Docker container for new Python files?"**
+No. The workspace is volume-mounted (`..:/workspace:cached`) into the container. `make dev` runs uvicorn with `--reload` directly inside the container and picks up all file changes instantly. Only rebuild (`docker compose build`) when the `Dockerfile` itself changes (e.g. new system packages) or after modifying `pyproject.toml` and needing `pip install` to re-run.
+
 **"Cache not working"**
 ```bash
-# Check Redis
+# Check Redis — note the actual key prefix used is "llmgw:cache:"
 redis-cli -h redis
-> KEYS *  # See cached keys
-> GET "cache:abc123"  # Check cache content
+> KEYS llmgw:cache:*          # See exact-match entries
+> KEYS llmgw:sem:*            # See semantic index entries
+> GET llmgw:cache:<sha256>    # Inspect a cached response
 
-# Check logs
-make dev  # Watch for cache hit/miss logs
+# Check logs (watch for cache.hit / cache.miss events)
+make dev
 
-# Verify temperature=0
-# Only deterministic requests are cached
+# Verify temperature=0  — only temperature=0 requests are cached
+# Check X-Cache-Status header in response
 ```
 
 **"Rate limiting not working"**

@@ -32,7 +32,9 @@
       "Bash(pre-commit run ruff-format --files tests/cost/test_pricing.py)",
       "Bash(pre-commit run ruff-format --files tests/cost/test_pricing.py tests/integration/test_gateway_integration.py tests/providers/test_litellm_wrapper.py)",
       "Bash(pre-commit install)",
-      "Bash(pre-commit autoupdate --freeze)"
+      "Bash(pre-commit autoupdate --freeze)",
+      "Bash(mypy src/llmgateway/observability/metrics.py)",
+      "Bash(mypy src/)"
     ],
     "additionalDirectories": [
       "/workspace/tests",

@@ -2,6 +2,132 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# ---------------------------------------------------------------------------
+# Alerting
+# ---------------------------------------------------------------------------
+alerting:
+  alertmanagers: []
+
+# ---------------------------------------------------------------------------
+# Recording and alerting rules (inlined — no separate rule_files directory
+# needed for the dev container setup)
+# ---------------------------------------------------------------------------
+rule_files: []
+
+groups:
+  - name: llm_gateway_recording
+    interval: 15s
+    rules:
+      # Per-model request rate over the last 5 minutes
+      - record: job:llm_requests_rate5m
+        expr: sum(rate(llm_requests_total[5m])) by (model, provider, status)
+
+      # Exact-cache hit ratio per model (avoids division-by-zero with clamp_min)
+      - record: job:llm_cache_hit_ratio5m
+        expr: >
+          sum(rate(llm_cache_hits_total[5m])) by (model)
+          /
+          clamp_min(
+            sum(rate(llm_cache_hits_total[5m])) by (model)
+            + sum(rate(llm_cache_misses_total[5m])) by (model),
+            1e-9
+          )
+
+      # Combined cache hit ratio (exact + semantic) per model
+      - record: job:llm_combined_cache_hit_ratio5m
+        expr: >
+          (sum(rate(llm_cache_hits_total[5m])) by (model)
+           + sum(rate(llm_semantic_cache_hits_total[5m])) by (model))
+          /
+          clamp_min(
+            sum(rate(llm_cache_hits_total[5m])) by (model)
+            + sum(rate(llm_cache_misses_total[5m])) by (model),
+            1e-9
+          )
+
+      # Hourly cost accumulation per model (useful for cost-projection panels)
+      - record: job:llm_cost_increase1h
+        expr: sum(increase(llm_cost_usd_total[1h])) by (model)
+
+      # P99 end-to-end request latency per model
+      - record: job:llm_request_p99_5m
+        expr: >
+          histogram_quantile(0.99,
+            sum(rate(llm_request_duration_seconds_bucket[5m])) by (le, model)
+          )
+
+  - name: llm_gateway_alerts
+    rules:
+      # -----------------------------------------------------------------------
+      # Error rate >5% for 2 consecutive minutes
+      # -----------------------------------------------------------------------
+      - alert: HighErrorRate
+        expr: >
+          sum(rate(llm_requests_total{status="error"}[5m]))
+          /
+          clamp_min(sum(rate(llm_requests_total[5m])), 1e-9)
+          > 0.05
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LLM Gateway error rate is high"
+          description: >
+            Error rate is {{ $value | humanizePercentage }} over the last 5 minutes.
+            Investigate provider connectivity and authentication.
+
+      # -----------------------------------------------------------------------
+      # P99 end-to-end latency >2 s for 5 consecutive minutes
+      # -----------------------------------------------------------------------
+      - alert: HighP99Latency
+        expr: >
+          histogram_quantile(0.99,
+            sum(rate(llm_request_duration_seconds_bucket[5m])) by (le, model)
+          ) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LLM Gateway P99 latency is above 2 seconds"
+          description: >
+            P99 latency for model {{ $labels.model }} is {{ $value | humanizeDuration }}.
+            Check provider response times and consider scaling.
+
+      # -----------------------------------------------------------------------
+      # Cumulative 24-hour cost exceeds $50
+      # -----------------------------------------------------------------------
+      - alert: HighDailyCost
+        expr: sum(increase(llm_cost_usd_total[24h])) > 50
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "LLM Gateway daily cost threshold exceeded"
+          description: >
+            Total estimated cost over the last 24 hours is ${{ $value | humanize }},
+            which exceeds the $50 alert threshold.
+
+      # -----------------------------------------------------------------------
+      # Rate limit denial rate >10% of all checks for 5 consecutive minutes
+      # -----------------------------------------------------------------------
+      - alert: HighRateLimitDenialRate
+        expr: >
+          sum(rate(llm_rate_limit_checks_total{result="denied"}[5m]))
+          /
+          clamp_min(sum(rate(llm_rate_limit_checks_total[5m])), 1e-9)
+          > 0.10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High rate limit denial rate"
+          description: >
+            {{ $value | humanizePercentage }} of rate limit checks are being denied.
+            Consider increasing capacity or investigating abnormal traffic patterns.
+
+# ---------------------------------------------------------------------------
+# Scrape targets
+# ---------------------------------------------------------------------------
 scrape_configs:
   - job_name: "llm-gateway"
     static_configs:

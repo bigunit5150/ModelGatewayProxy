@@ -27,6 +27,7 @@ from tenacity import (
     wait_exponential,
 )
 
+from llmgateway.observability.metrics import PROVIDER_API_DURATION
 from llmgateway.providers.errors import (
     AuthError,
     InvalidRequestError,
@@ -303,7 +304,14 @@ class LLMGatewayProvider:
         ):
             with attempt:
                 try:
-                    return await litellm.acompletion(timeout=self._timeout, **params)
+                    _model = str(params.get("model", ""))
+                    _t0 = time.monotonic()
+                    result = await litellm.acompletion(timeout=self._timeout, **params)
+                    PROVIDER_API_DURATION.labels(
+                        model=_model,
+                        provider=self._extract_provider(_model),
+                    ).observe(time.monotonic() - _t0)
+                    return result
                 except Exception as exc:
                     raise self._map_error(exc, str(params.get("model", ""))) from exc
 

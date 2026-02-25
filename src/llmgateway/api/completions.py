@@ -7,11 +7,12 @@ errors to the appropriate HTTP status codes.
 """
 
 import asyncio
+import contextlib
 import json
 import math
 import time
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Generator
 from typing import Any
 
 import structlog
@@ -25,6 +26,12 @@ from pydantic import BaseModel, Field
 from llmgateway.cache import CacheManager
 from llmgateway.config import settings
 from llmgateway.cost import CostTracker, calculate_cost
+from llmgateway.observability.metrics import (
+    ACTIVE_REQUESTS,
+    REQUEST_DURATION,
+    REQUESTS_TOTAL,
+    TOKEN_COUNT,
+)
 from llmgateway.providers import (
     AuthError,
     CompletionRequest,
@@ -51,6 +58,17 @@ _COST_TOTAL = Counter(
     "Cumulative estimated cost of LLM requests in USD",
     ["model", "user_id"],
 )
+
+
+@contextlib.contextmanager
+def _active_request_ctx(provider: str) -> Generator[None, None, None]:
+    """Increment the in-flight gauge on entry; decrement on exit (return or raise)."""
+    ACTIVE_REQUESTS.labels(provider=provider).inc()
+    try:
+        yield
+    finally:
+        ACTIVE_REQUESTS.labels(provider=provider).dec()
+
 
 # ---------------------------------------------------------------------------
 # HTTP status codes for each gateway error type
@@ -208,7 +226,10 @@ async def chat_completions(
         base_headers["X-RateLimit-Remaining"] = str(int(rl.remaining))
         base_headers["X-RateLimit-Reset"] = str(int(rl.reset_time))
 
-    with _tracer.start_as_current_span("gateway.completions") as span:
+    with (
+        _tracer.start_as_current_span("gateway.completions") as span,
+        _active_request_ctx(provider_name),
+    ):
         span.set_attribute("gen_ai.system", provider_name)
         span.set_attribute("gen_ai.request.model", body.model)
         span.set_attribute("llm.stream", body.stream)
@@ -237,6 +258,7 @@ async def chat_completions(
         # Streaming — no cache for streamed responses
         # ------------------------------------------------------------------
         if body.stream:
+            REQUESTS_TOTAL.labels(model=body.model, provider=provider_name, status="success").inc()
             return StreamingResponse(
                 _stream_sse(provider, completion_request, request_id, created, log, start_time),
                 media_type="text/event-stream",
@@ -277,6 +299,12 @@ async def chat_completions(
                     cached=True,
                     cache_type="EXACT",
                 )
+                REQUESTS_TOTAL.labels(
+                    model=body.model, provider=provider_name, status="success"
+                ).inc()
+                REQUEST_DURATION.labels(
+                    model=body.model, provider=provider_name, cached="true"
+                ).observe(time.monotonic() - start_time)
                 return JSONResponse(
                     content=cached,
                     headers={
@@ -318,6 +346,12 @@ async def chat_completions(
                     cached=True,
                     cache_type="SEMANTIC",
                 )
+                REQUESTS_TOTAL.labels(
+                    model=body.model, provider=provider_name, status="success"
+                ).inc()
+                REQUEST_DURATION.labels(
+                    model=body.model, provider=provider_name, cached="true"
+                ).observe(time.monotonic() - start_time)
                 return JSONResponse(
                     content=sem_cached,
                     headers={
@@ -347,6 +381,10 @@ async def chat_completions(
                 error=exc.message,
                 duration_ms=duration_ms,
             )
+            REQUESTS_TOTAL.labels(model=body.model, provider=provider_name, status="error").inc()
+            REQUEST_DURATION.labels(
+                model=body.model, provider=provider_name, cached="false"
+            ).observe(time.monotonic() - start_time)
             status_code = _ERROR_STATUS.get(type(exc), 500)
             error_headers = dict(base_headers)
             if isinstance(exc, RateLimitError) and exc.retry_after is not None:
@@ -380,8 +418,16 @@ async def chat_completions(
             cache_type=None,
         )
 
-        duration_ms = round((time.monotonic() - start_time) * 1000, 2)
+        duration_s = time.monotonic() - start_time
+        duration_ms = round(duration_s * 1000, 2)
         log.info("completion_request_complete", duration_ms=duration_ms, usage=usage)
+
+        REQUESTS_TOTAL.labels(model=body.model, provider=provider_name, status="success").inc()
+        REQUEST_DURATION.labels(model=body.model, provider=provider_name, cached="false").observe(
+            duration_s
+        )
+        TOKEN_COUNT.labels(model=body.model, type="input").observe(input_tokens)
+        TOKEN_COUNT.labels(model=body.model, type="output").observe(output_tokens)
 
         return JSONResponse(content=response_data, headers=base_headers)
 

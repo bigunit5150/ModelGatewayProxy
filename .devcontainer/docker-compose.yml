@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   app:
     build:
@@ -85,6 +83,8 @@ services:
       - GF_AUTH_DISABLE_LOGIN_FORM=true
     volumes:
       - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
     networks:
       - gateway-net
 

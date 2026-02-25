@@ -34,7 +34,8 @@
       "Bash(pre-commit install)",
       "Bash(pre-commit autoupdate --freeze)",
       "Bash(mypy src/llmgateway/observability/metrics.py)",
-      "Bash(mypy src/)"
+      "Bash(mypy src/)",
+      "Bash(git config --list)"
     ],
     "additionalDirectories": [
       "/workspace/tests",

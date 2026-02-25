@@ -1,0 +1,56 @@
+# flyctl launch added from .gitignore
+# Python
+**/__pycache__
+**/*.py[cod]
+**/*$py.class
+**/*.so
+
+# Virtual environments
+**/venv
+**/.venv
+**/ENV
+**/env
+
+# Testing & coverage
+**/.pytest_cache
+**/.coverage
+**/htmlcov
+**/.tox
+
+# IDEs
+**/.vscode
+**/.idea
+**/*.swp
+**/*.swo
+
+# Environment & secrets
+**/.env
+**/.env.local
+**/.env.*.local
+
+# Build artefacts
+**/dist
+**/build
+**/*.egg-info
+**/*.egg
+**/MANIFEST
+
+# Type checkers & linters
+**/.mypy_cache
+**/.ruff_cache
+
+# OS
+**/.DS_Store
+**/Thumbs.db
+
+# flyctl launch added from .pytest_cache/.gitignore
+# Created by pytest automatically.
+.pytest_cache/**/*
+
+# flyctl launch added from .ruff_cache/.gitignore
+.ruff_cache/**/*
+
+# flyctl launch added from htmlcov/.gitignore
+# Created by coverage.py
+htmlcov/**/*
+fly.toml

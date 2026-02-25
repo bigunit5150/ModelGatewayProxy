@@ -25,7 +25,8 @@
       "Bash(timeout 10 make:*)",
       "Bash(git reset:*)",
       "Bash(git commit:*)",
-      "Bash(ruff format:*)"
+      "Bash(ruff format:*)",
+      "Bash(ls:*)"
     ],
     "additionalDirectories": [
       "/workspace/tests",

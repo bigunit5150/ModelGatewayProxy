@@ -411,12 +411,12 @@ class TestObservability:
             for span in trace.get("spans", []):
                 span_names.add(span.get("operationName", ""))
 
-        assert (
-            "gateway.completions" in span_names
-        ), f"Expected 'gateway.completions' span; found: {sorted(span_names)}"
-        assert (
-            "llm.generate" in span_names
-        ), f"Expected 'llm.generate' span; found: {sorted(span_names)}"
+        assert "gateway.completions" in span_names, (
+            f"Expected 'gateway.completions' span; found: {sorted(span_names)}"
+        )
+        assert "llm.generate" in span_names, (
+            f"Expected 'llm.generate' span; found: {sorted(span_names)}"
+        )
 
     @needs_jaeger
     @needs_anthropic

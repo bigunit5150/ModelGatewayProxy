@@ -112,6 +112,6 @@ class TestPricingTableStructure:
         # Output tokens are typically more expensive than input tokens.
         # A handful of models (e.g. Together AI) have equal rates.
         for model, (in_rate, out_rate) in PRICING_TABLE.items():
-            assert (
-                out_rate >= in_rate or in_rate == out_rate
-            ), f"{model}: unexpected in_rate ({in_rate}) > out_rate ({out_rate})"
+            assert out_rate >= in_rate or in_rate == out_rate, (
+                f"{model}: unexpected in_rate ({in_rate}) > out_rate ({out_rate})"
+            )

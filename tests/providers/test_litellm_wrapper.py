@@ -772,9 +772,9 @@ class TestErrorMapping:
         ]
         for litellm_exc, expected_type in cases:
             err = await self._assert_maps_to(provider, mocker, litellm_exc, expected_type)
-            assert (
-                err.original_error is litellm_exc
-            ), f"{expected_type.__name__}.original_error should be the original litellm exc"
+            assert err.original_error is litellm_exc, (
+                f"{expected_type.__name__}.original_error should be the original litellm exc"
+            )
 
 
 # ---------------------------------------------------------------------------

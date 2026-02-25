@@ -30,7 +30,7 @@ import hashlib
 import json
 import time
 import uuid
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import structlog
@@ -229,7 +229,7 @@ class CacheManager:
         )
 
         try:
-            return json.loads(entry.value)
+            return cast(dict[str, Any], json.loads(entry.value))
         except json.JSONDecodeError as exc:
             _log.warning("cache.decode_error", key=cache_key, error=str(exc))
             return None

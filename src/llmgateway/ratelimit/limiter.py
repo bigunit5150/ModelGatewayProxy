@@ -28,7 +28,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -203,7 +203,7 @@ class RateLimiter:
 
         return result
 
-    async def get_rate_limit_info(self, user_id: str) -> dict:
+    async def get_rate_limit_info(self, user_id: str) -> dict[str, Any]:
         """Return the current bucket state for *user_id* without consuming tokens.
 
         Useful for admin / debug endpoints.  Internally calls the Lua script

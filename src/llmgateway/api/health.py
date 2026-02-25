@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime
+from typing import cast
 
 import structlog
 from fastapi import APIRouter
@@ -46,7 +47,7 @@ async def readiness() -> JSONResponse:
         with tracer.start_as_current_span("health.check.redis"):
             redis_client: Redis = Redis.from_url(settings.redis_url, socket_timeout=5)
             try:
-                await asyncio.wait_for(redis_client.ping(), timeout=5.0)
+                await asyncio.wait_for(cast(asyncio.Future[bool], redis_client.ping()), timeout=5.0)
                 checks["redis"] = "ok"
                 log.debug("Redis ping succeeded")
             except Exception as exc:

@@ -33,7 +33,7 @@ structlog.configure(
         structlog.processors.JSONRenderer(),
     ],
     wrapper_class=structlog.make_filtering_bound_logger(
-        structlog.stdlib.NAME_TO_LEVEL.get(settings.log_level.upper(), 20)
+        structlog.stdlib.NAME_TO_LEVEL.get(settings.log_level.upper(), 20)  # type: ignore[attr-defined]
     ),
     context_class=dict,
     logger_factory=structlog.PrintLoggerFactory(),

@@ -148,7 +148,7 @@ class TokenBucket:
 
             try:
                 sha = await self._get_sha()
-                result = await self._redis.evalsha(
+                result = await self._redis.evalsha(  # type: ignore[misc]
                     sha,
                     1,  # numkeys
                     key,  # KEYS[1]

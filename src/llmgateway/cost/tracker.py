@@ -16,6 +16,7 @@ outage never causes a request failure.  The error is logged at WARNING level.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from typing import Any
 
 import structlog
 from opentelemetry import trace
@@ -124,7 +125,7 @@ class CostTracker:
         user_id: str | None = None,
         start: datetime | None = None,
         end: datetime | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Return aggregated cost summary, optionally filtered by user and date range.
 
         Returns:

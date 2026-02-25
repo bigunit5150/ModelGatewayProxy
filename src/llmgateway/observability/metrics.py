@@ -54,7 +54,7 @@ ACTIVE_REQUESTS = Gauge(
 TOKEN_COUNT = Histogram(
     "llm_token_count",
     "Token count per completion request (provider calls only, excludes cache hits)",
-    ["model", "type"],  # type: "input" | "output"
+    ["model", "type"],  # values: "input" | "output"
     buckets=[50, 100, 250, 500, 1000, 2000, 4000, 8000, 16000, 32000],
 )
 

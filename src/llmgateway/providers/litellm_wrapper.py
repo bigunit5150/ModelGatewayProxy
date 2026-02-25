@@ -212,7 +212,7 @@ class LLMGatewayProvider:
             Estimated token count (always at least 1).
         """
         try:
-            return litellm.token_counter(model=model, text=text)
+            return int(litellm.token_counter(model=model, text=text))
         except Exception as exc:
             _log.warning(
                 "token_counting_failed",
@@ -407,7 +407,7 @@ class LLMGatewayProvider:
 
         provider = self._extract_provider(model)
 
-        if isinstance(error, litellm.RateLimitError):
+        if isinstance(error, litellm.RateLimitError):  # type: ignore[attr-defined]
             return RateLimitError(
                 message=str(error),
                 provider=provider,
@@ -415,14 +415,14 @@ class LLMGatewayProvider:
                 original_error=error,
             )
 
-        if isinstance(error, litellm.AuthenticationError):
+        if isinstance(error, litellm.AuthenticationError):  # type: ignore[attr-defined]
             return AuthError(
                 message=f"Authentication failed for {provider}: {error}",
                 provider=provider,
                 original_error=error,
             )
 
-        if isinstance(error, litellm.Timeout):
+        if isinstance(error, litellm.Timeout):  # type: ignore[attr-defined]
             return TimeoutError(
                 message=f"Request to {provider} timed out: {error}",
                 provider=provider,
@@ -430,7 +430,7 @@ class LLMGatewayProvider:
             )
 
         # BadRequestError is the parent of ContextWindowExceededError in LiteLLM.
-        if isinstance(error, litellm.BadRequestError):
+        if isinstance(error, litellm.BadRequestError):  # type: ignore[attr-defined]
             return InvalidRequestError(
                 message=f"Invalid request to {provider}: {error}",
                 provider=provider,
@@ -439,7 +439,7 @@ class LLMGatewayProvider:
 
         if isinstance(
             error,
-            litellm.ServiceUnavailableError | litellm.APIConnectionError | litellm.APIError,
+            litellm.ServiceUnavailableError | litellm.APIConnectionError | litellm.APIError,  # type: ignore[attr-defined]
         ):
             return ProviderUnavailableError(
                 message=f"{provider} is unavailable: {error}",

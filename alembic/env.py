@@ -1,4 +1,5 @@
 import asyncio
+import os
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -15,6 +16,11 @@ config = context.config
 # This line sets up loggers basically.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+# Allow DATABASE_URL env var to override the value in alembic.ini.
+# This is required for production (Fly.io sets DATABASE_URL as a secret).
+if db_url := os.environ.get("DATABASE_URL"):
+    config.set_main_option("sqlalchemy.url", db_url)
 
 # Import the metadata from our ORM models so autogenerate can detect changes.
 from llmgateway.cost.tracker import _Base  # noqa: E402

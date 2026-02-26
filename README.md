@@ -116,7 +116,7 @@ The gateway exposes an **OpenAI-compatible** REST API, so any client that works 
 |---|---|
 | `X-Request-ID` | UUID identifying this specific request (appears in logs and traces) |
 | `X-Provider` | Detected provider name (e.g. `anthropic`, `openai`, `groq`) |
-| `X-Cache-Status` | `MISS` (caching not yet implemented) |
+| `X-Cache-Status` | `HIT`, `SEMANTIC_HIT`, or `MISS` — exact-match and semantic caching backed by Redis |
 
 **curl — non-streaming:**
 
@@ -363,32 +363,64 @@ All logs are emitted as JSON with a `request_id` field that links the start, err
 llm-gateway/
 ├── src/llmgateway/
 │   ├── api/
-│   │   ├── completions.py     # POST /v1/chat/completions (OpenAI-compatible)
-│   │   └── health.py          # Health check endpoints
+│   │   ├── completions.py        # POST /v1/chat/completions (OpenAI-compatible)
+│   │   ├── admin.py              # Cost reporting endpoints
+│   │   └── health.py             # Liveness, readiness, and metrics endpoints
 │   ├── providers/
-│   │   ├── litellm_wrapper.py # LLMGatewayProvider — main entry point
-│   │   ├── models.py          # Request/response types
-│   │   └── errors.py          # Typed exception hierarchy
-│   ├── config.py              # Pydantic settings (reads .env)
-│   └── main.py                # FastAPI app + OTel setup
+│   │   ├── litellm_wrapper.py    # LLMGatewayProvider — multi-provider abstraction
+│   │   ├── models.py             # Request/response dataclasses
+│   │   └── errors.py             # Typed exception hierarchy
+│   ├── cache/
+│   │   ├── cache_manager.py      # Exact-match + semantic caching
+│   │   ├── redis_cache.py        # Redis backend implementation
+│   │   ├── embeddings.py         # Sentence-transformers wrapper
+│   │   └── base.py               # CacheBackend protocol
+│   ├── ratelimit/
+│   │   ├── limiter.py            # Per-user tier-based rate limiting
+│   │   ├── token_bucket.py       # Redis + Lua token bucket
+│   │   └── scripts/
+│   │       └── token_bucket.lua  # Atomic Redis rate-limit operations
+│   ├── cost/
+│   │   ├── pricing.py            # Per-model pricing table and calculator
+│   │   └── tracker.py            # PostgreSQL usage records + daily alerts
+│   ├── observability/
+│   │   ├── metrics.py            # Prometheus metric definitions
+│   │   └── tracing.py            # OpenTelemetry span helpers
+│   ├── config.py                 # Pydantic settings (reads .env)
+│   └── main.py                   # FastAPI app, middleware, lifecycle events
 ├── tests/
 │   ├── api/
-│   │   └── test_completions.py       # Unit tests for /v1/chat/completions
-│   ├── integration/
-│   │   └── test_gateway_integration.py  # End-to-end tests (real API calls)
+│   │   ├── test_completions.py        # Streaming, caching, rate-limit headers
+│   │   └── test_admin.py              # Admin auth and cost endpoints
+│   ├── cache/
+│   │   ├── test_cache_manager.py      # Exact + semantic cache paths
+│   │   ├── test_redis_cache.py        # Redis backend operations
+│   │   └── test_embeddings.py         # Embedding model tests
+│   ├── ratelimit/
+│   │   ├── test_limiter.py            # Tier-based rate limiting
+│   │   └── test_token_bucket.py       # Lua script + bucket logic
+│   ├── cost/
+│   │   ├── test_pricing.py            # Pricing lookup and fallback
+│   │   └── test_tracker.py            # Usage record persistence
 │   ├── providers/
-│   │   └── test_litellm_wrapper.py   # Unit tests for the provider layer
-│   ├── conftest.py                   # Shared fixtures
+│   │   └── test_litellm_wrapper.py    # Error mapping, retry, OTel spans
+│   ├── integration/
+│   │   └── test_gateway_integration.py  # End-to-end (real API calls)
 │   └── test_health.py                # Health endpoint tests
+├── alembic/                       # Database migration scripts
 ├── scripts/
-│   ├── test_litellm_wrapper.py       # Anthropic smoke test
-│   └── test_all_providers.py         # Multi-provider smoke test
+│   ├── test_litellm_wrapper.py    # Anthropic smoke test
+│   └── test_all_providers.py      # Multi-provider smoke test
 ├── docs/
+│   ├── deployment.md              # Fly.io production deployment guide
 │   └── providers/
 │       ├── README.md              # Provider system overview
 │       ├── design-decisions.md    # Architecture decision records
 │       └── troubleshooting.md     # Common issues and fixes
-├── .env                           # API keys (not committed)
+├── .github/workflows/ci.yml      # CI/CD: lint, type-check, test, deploy
+├── Dockerfile                     # Multi-stage production build
+├── fly.toml                       # Fly.io app configuration
+├── .env.example                   # Environment variable template
 ├── pyproject.toml                 # Dependencies and tool config
 └── Makefile                       # Dev commands
 ```

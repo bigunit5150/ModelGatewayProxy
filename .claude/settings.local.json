@@ -35,7 +35,21 @@
       "Bash(pre-commit autoupdate --freeze)",
       "Bash(mypy src/llmgateway/observability/metrics.py)",
       "Bash(mypy src/)",
-      "Bash(git config --list)"
+      "Bash(git config --list)",
+      "Bash(flyctl secrets set:*)",
+      "Bash(flyctl secrets list:*)",
+      "Bash(flyctl secrets unset:*)",
+      "Bash(flyctl deploy:*)",
+      "Bash(flyctl logs:*)",
+      "Bash(flyctl status:*)",
+      "Bash(flyctl machines list:*)",
+      "Bash(flyctl machines start:*)",
+      "Bash(flyctl postgres list:*)",
+      "Bash(flyctl postgres connect:*)",
+      "Bash(flyctl ssh console:*)",
+      "Bash(git push:*)",
+      "Bash(export PATH=\"$HOME/.fly/bin:$PATH\")",
+      "Bash(git add .github/workflows/ci.yml)"
     ],
     "additionalDirectories": [
       "/workspace/tests",

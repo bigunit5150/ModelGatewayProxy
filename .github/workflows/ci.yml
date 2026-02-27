@@ -91,12 +91,17 @@ jobs:
         uses: superfly/flyctl-actions/setup-flyctl@master
 
       - name: Wake Postgres cluster
+        continue-on-error: true
         run: |
-          MACHINE_ID=$(flyctl machines list -a llm-gateway-db --json | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")
+          MACHINES_JSON=$(flyctl machines list -a llm-gateway-db --json 2>&1) || {
+            echo "::warning::Failed to list Postgres machines: $MACHINES_JSON"
+            exit 0
+          }
+          MACHINE_ID=$(echo "$MACHINES_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")
           echo "Postgres machine ID: $MACHINE_ID"
           flyctl machines start "$MACHINE_ID" -a llm-gateway-db || true
           for i in 1 2 3 4 5 6; do
-            STATE=$(flyctl machines list -a llm-gateway-db --json | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['state'])")
+            STATE=$(flyctl machines list -a llm-gateway-db --json | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['state'])" 2>/dev/null || echo "unknown")
             echo "Postgres machine state: $STATE (attempt $i/6)"
             if [ "$STATE" = "started" ]; then break; fi
             sleep 10

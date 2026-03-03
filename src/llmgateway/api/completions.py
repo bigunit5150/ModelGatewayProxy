@@ -131,6 +131,22 @@ def get_cost_tracker(request: Request) -> CostTracker | None:
     return getattr(request.app.state, "cost_tracker", None)
 
 
+def _require_api_key(request: Request) -> None:
+    """Enforce ``Authorization: Bearer <key>`` when ``gateway_api_key`` is set.
+
+    If ``gateway_api_key`` is *not* configured (``None``), every request is
+    allowed through — this keeps local development frictionless.
+    """
+    if settings.gateway_api_key is None:
+        return
+    auth = request.headers.get("Authorization")
+    if not auth or not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = auth.removeprefix("Bearer ")
+    if token != settings.gateway_api_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+
 def _extract_user_id(body: ChatCompletionRequest, request: Request) -> str:
     """Resolve a stable user identifier for rate limiting.
 
@@ -161,6 +177,7 @@ async def chat_completions(
     cache_manager: CacheManager | None = Depends(get_cache_manager),
     rate_limiter: RateLimiter | None = Depends(get_rate_limiter),
     cost_tracker: CostTracker | None = Depends(get_cost_tracker),
+    _auth: None = Depends(_require_api_key),
 ) -> StreamingResponse | JSONResponse:
     """Generate a chat completion.
 

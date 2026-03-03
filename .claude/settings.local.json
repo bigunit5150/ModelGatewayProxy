@@ -47,9 +47,17 @@
       "Bash(flyctl postgres list:*)",
       "Bash(flyctl postgres connect:*)",
       "Bash(flyctl ssh console:*)",
-      "Bash(git push:*)",
       "Bash(export PATH=\"$HOME/.fly/bin:$PATH\")",
-      "Bash(git add .github/workflows/ci.yml)"
+      "Bash(git add .github/workflows/ci.yml)",
+      "Bash(wc -l /workspace/src/llmgateway/**/*.py)",
+      "Bash(find /workspace/src -name \"*.py\" -exec grep -l \"TODO\\\\|FIXME\\\\|XXX\\\\|HACK\" {} ;)",
+      "Bash(wc -l /workspace/tests/**/*.py)",
+      "Bash(find /workspace/src -name \"*.py\" -exec grep -l \"pass$\" {} ;)",
+      "Bash(find /workspace/src/llmgateway -name \"*.py\" -exec wc -l {} +)",
+      "Bash(find /workspace/src -name \"*.py\" -exec grep -l \"NotImplemented\\\\|raise NotImplementedError\" {} ;)",
+      "Bash(git add README.md LLM_Gateway_Phase1_Final_Learning_Plan.md)",
+      "Bash(OTEL_EXPORTER_OTLP_ENDPOINT=\"http://localhost:4318\" REDIS_URL=\"redis://localhost:6379\" DATABASE_URL=\"postgresql+asyncpg://postgres:postgres@localhost:5432/llmgateway\" python -m pytest tests/api/test_completions.py -v)",
+      "Bash(OTEL_EXPORTER_OTLP_ENDPOINT=\"http://localhost:4318\" REDIS_URL=\"redis://localhost:6379\" DATABASE_URL=\"postgresql+asyncpg://postgres:postgres@localhost:5432/llmgateway\" python -m pytest --tb=short)"
     ],
     "additionalDirectories": [
       "/workspace/tests",

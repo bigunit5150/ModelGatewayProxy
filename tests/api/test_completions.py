@@ -81,6 +81,57 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
 # ---------------------------------------------------------------------------
 
 
+class TestApiKeyAuth:
+    """Tests for the _require_api_key dependency (Authorization: Bearer header)."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_provider(self) -> None:
+        app.state.provider = _make_chunks(
+            CompletionChunk(content="ok", finish_reason="stop", usage=None, model=None)
+        )
+
+    async def test_no_key_configured_allows_request(self, client: AsyncClient, monkeypatch) -> None:
+        """When gateway_api_key is None (default), requests pass through without auth."""
+        monkeypatch.setattr("llmgateway.api.completions.settings.gateway_api_key", None)
+        response = await client.post("/v1/chat/completions", json=_DEFAULT_BODY)
+        assert response.status_code == 200
+
+    async def test_missing_header_returns_401(self, client: AsyncClient, monkeypatch) -> None:
+        monkeypatch.setattr("llmgateway.api.completions.settings.gateway_api_key", "test-secret")
+        response = await client.post("/v1/chat/completions", json=_DEFAULT_BODY)
+        assert response.status_code == 401
+
+    async def test_wrong_key_returns_401(self, client: AsyncClient, monkeypatch) -> None:
+        monkeypatch.setattr("llmgateway.api.completions.settings.gateway_api_key", "test-secret")
+        response = await client.post(
+            "/v1/chat/completions",
+            json=_DEFAULT_BODY,
+            headers={"Authorization": "Bearer wrong-key"},
+        )
+        assert response.status_code == 401
+
+    async def test_correct_key_returns_200(self, client: AsyncClient, monkeypatch) -> None:
+        monkeypatch.setattr("llmgateway.api.completions.settings.gateway_api_key", "test-secret")
+        response = await client.post(
+            "/v1/chat/completions",
+            json=_DEFAULT_BODY,
+            headers={"Authorization": "Bearer test-secret"},
+        )
+        assert response.status_code == 200
+
+    async def test_malformed_auth_header_returns_401(
+        self, client: AsyncClient, monkeypatch
+    ) -> None:
+        """Authorization header without 'Bearer ' prefix is rejected."""
+        monkeypatch.setattr("llmgateway.api.completions.settings.gateway_api_key", "test-secret")
+        response = await client.post(
+            "/v1/chat/completions",
+            json=_DEFAULT_BODY,
+            headers={"Authorization": "Basic test-secret"},
+        )
+        assert response.status_code == 401
+
+
 class TestGetProvider:
     async def test_missing_provider_returns_503(self, client: AsyncClient) -> None:
         response = await client.post("/v1/chat/completions", json=_DEFAULT_BODY)

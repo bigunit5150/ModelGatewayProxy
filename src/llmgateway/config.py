@@ -71,6 +71,12 @@ class Settings(BaseSettings):
         description="Log a warning when daily spend (USD) exceeds this value",
     )
 
+    # Gateway API key — protects /v1/chat/completions when set
+    gateway_api_key: str | None = Field(
+        default=None,
+        description="Secret key required in Authorization: Bearer header for completions endpoint",
+    )
+
     # Admin API
     admin_api_key: str | None = Field(
         default=None,

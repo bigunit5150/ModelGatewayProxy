@@ -91,21 +91,43 @@ jobs:
         uses: superfly/flyctl-actions/setup-flyctl@master
 
       - name: Wake Postgres cluster
-        continue-on-error: true
         run: |
-          MACHINES_JSON=$(flyctl machines list -a llm-gateway-db --json 2>&1) || {
-            echo "::warning::Failed to list Postgres machines: $MACHINES_JSON"
-            exit 0
-          }
+          set -euo pipefail
+
+          echo "::group::Listing Postgres machines"
+          MACHINES_JSON=$(flyctl machines list -a llm-gateway-db --json)
           MACHINE_ID=$(echo "$MACHINES_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")
-          echo "Postgres machine ID: $MACHINE_ID"
-          flyctl machines start "$MACHINE_ID" -a llm-gateway-db || true
-          for i in 1 2 3 4 5 6; do
-            STATE=$(flyctl machines list -a llm-gateway-db --json | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['state'])" 2>/dev/null || echo "unknown")
-            echo "Postgres machine state: $STATE (attempt $i/6)"
-            if [ "$STATE" = "started" ]; then break; fi
-            sleep 10
-          done
+          STATE=$(echo "$MACHINES_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['state'])")
+          echo "Postgres machine: $MACHINE_ID (state: $STATE)"
+          echo "::endgroup::"
+
+          if [ "$STATE" = "started" ]; then
+            echo "Postgres is already running"
+          else
+            echo "Starting Postgres machine $MACHINE_ID ..."
+            flyctl machines start "$MACHINE_ID" -a llm-gateway-db || true
+
+            echo "::group::Waiting for Postgres to reach started state"
+            for i in $(seq 1 12); do
+              STATE=$(flyctl machines list -a llm-gateway-db --json \
+                | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['state'])" 2>/dev/null \
+                || echo "unknown")
+              echo "  attempt $i/12 — state: $STATE"
+              if [ "$STATE" = "started" ]; then break; fi
+              sleep 10
+            done
+            echo "::endgroup::"
+
+            if [ "$STATE" != "started" ]; then
+              echo "::error::Postgres failed to start after 2 minutes (state: $STATE)"
+              exit 1
+            fi
+          fi
+
+          # Give Postgres a moment to accept connections after reporting started
+          echo "Waiting 5s for Postgres to accept connections ..."
+          sleep 5
+          echo "Postgres is ready"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 

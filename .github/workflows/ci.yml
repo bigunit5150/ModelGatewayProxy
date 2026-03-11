@@ -75,6 +75,37 @@ jobs:
           fail_ci_if_error: false
 
   # ---------------------------------------------------------------------------
+  # Publish job — builds and pushes Docker image to GHCR after tests pass
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish Docker image to GHCR
+    needs: test
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/modelgatewayproxy:latest
+
+  # ---------------------------------------------------------------------------
   # Deploy job — runs only on pushes to the default branch after tests pass
   # ---------------------------------------------------------------------------
   deploy:
